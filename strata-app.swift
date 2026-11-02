@@ -2,12 +2,53 @@ import SwiftUI
 import Foundation
 
 // MARK: - Endpoints (JSX CMD + the control server on :8090)
+// Not hardcoded: the Server tab edits one base URL (`scheme://host`), persisted in
+// UserDefaults, and every endpoint is derived from it — metrics on :8080, control
+// on :8090. The field accepts `192.168.1.13`, `http://host` or a full
+// `http://host:8080/metrics`; the scheme/host is kept, path and port are replaced.
 
-let metricsURL = "http://192.168.1.13:8080/metrics"
-let startURL = "http://192.168.1.13:8090/start"
-let stopURL = "http://192.168.1.13:8090/stop"
+// Own suite, so the value lands in ~/Library/Preferences/com.strata.widget.plist
+// rather than the global domain (this binary has no bundle identifier).
+let strataDefaults = UserDefaults(suiteName: "com.strata.widget")!
+let baseURLKey = "strata.baseURL"
+let defaultBaseURL = "http://192.168.1.13"
+let metricsPort = 8080
+let controlPort = 8090
 
 let apiKey = "strata" // server --api-key; every request carries it as Authorization: Bearer
+
+// nil when the text can't name a host; the caller keeps the draft visible instead.
+func normalizeBase(_ raw: String) -> String? {
+    var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if s.isEmpty { return nil }
+    let lowered = s.lowercased()
+    if !lowered.hasPrefix("http://") && !lowered.hasPrefix("https://") { s = "http://" + s }
+    guard var c = URLComponents(string: s), let host = c.host, !host.isEmpty else { return nil }
+    c.path = "" // endpoints append their own path
+    c.port = nil // metrics/control ports are fixed
+    c.query = nil
+    c.fragment = nil
+    return c.url?.absoluteString
+}
+
+func endpoint(_ path: String, port: Int) -> String? {
+    guard var c = URLComponents(string: strata.baseURL) else { return nil }
+    c.path = path
+    c.port = port
+    return c.url?.absoluteString
+}
+
+func metricsURL() -> String? { endpoint("/metrics", port: metricsPort) }
+func controlURL(_ cmd: String) -> String? { endpoint("/\(cmd)", port: controlPort) }
+func startCoderURL() -> String? { controlURL("start-coder") }
+func startGyroMURL() -> String? { controlURL("start-gyro") }
+func stopURL() -> String? { controlURL("stop") }
+
+// Host-only view of the base URL for captions ("192.168.1.13:8080 unreachable").
+func hostLabel() -> String {
+    if let c = URLComponents(string: strata.baseURL), let host = c.host, !host.isEmpty { return host }
+    return strata.baseURL
+}
 
 let GiB = 1_073_741_824.0 // JSX `GiB = 1073741824`
 
@@ -21,8 +62,8 @@ func nowMs() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
 // spawn a child process.) Verified live: `Bearer strata` → 200 on :8080/metrics,
 // missing key → 401. curl -m 3 mirrors the JSX timeout.
 
-func fetchBody(_ url: String) async -> String? {
-    guard let target = URL(string: url) else { return nil }
+func fetchBody(_ url: String?) async -> String? {
+    guard let url, let target = URL(string: url) else { return nil }
     // Per-endpoint temp file (port+path+pid): polls never race each other.
     let name = String(target.path.map { c in (c.isLetter || c.isNumber) ? c : "-" }) // "/metrics" → "-metrics-"
     let tmp = "/tmp/strata-fetch-\(target.port ?? 0)-\(name)-\(getpid()).json"
@@ -42,7 +83,7 @@ func fetchBody(_ url: String) async -> String? {
 }
 
 // Fire-and-forget control GETs; /stop can take ~40s, so never block the UI.
-func runControl(_ url: String) { Task { _ = await fetchBody(url) } }
+func runControl(_ url: String?) { Task { _ = await fetchBody(url) } }
 
 // MARK: - Shared state (JSX module-level `let tab / startTs / spinI`)
 
@@ -51,8 +92,30 @@ func runControl(_ url: String) { Task { _ = await fetchBody(url) } }
     var tab = "metrics"
     var startTsMs: Int? = nil
     var spinFrame = 0
+    // Persisted server base URL; urlText is the field's live draft, so typing
+    // mid-edit never repoints the poller.
+    var baseURL: String = strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
+    var urlText: String = strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
+    var urlError: String? = nil
 }
 let strata = StrataState()
+
+// Commit the field on Return / Apply: normalize, persist, repoint the poller, and
+// drop the stale payload so the card re-reads from the new host right away.
+func commitURL() {
+    guard let base = normalizeBase(strata.urlText) else {
+        strata.urlError = "not a host · still polling \(hostLabel())"
+        return
+    }
+    strata.urlError = nil
+    if base != strata.baseURL {
+        strata.baseURL = base
+        strata.urlText = base
+        strataDefaults.set(base, forKey: baseURLKey)
+        strata.payload = nil
+        strata.startTsMs = nil
+    }
+}
 
 // The poller replaces refreshFrequency=1000 + curl -m 3: one long-running Task
 // loop, decode, assign, sleep 1s. Spawned once when the app struct initializes.
@@ -60,7 +123,7 @@ func startPolling() {
     Task {
         while !Task.isCancelled {
             var parsed: MetricsPayload? = nil
-            if let body = await fetchBody(metricsURL) {
+            if let url = metricsURL(), let body = await fetchBody(url) {
                 parsed = try? JSONDecoder().decode(MetricsPayload.self, from: Data(body.utf8))
             }
             strata.payload = parsed
@@ -87,7 +150,7 @@ func tabPillsRow() -> some View {
 func headerRow(_ pill: String, _ pillColor: Color) -> some View {
     HStack {
         Text("Strata")
-            .font(.system(size: 13, weight: .bold))
+            .font(.custom("Outfit", size: 13)).fontWeight(.bold)
             .tracking(0.4)
             .foregroundStyle(cText)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -98,7 +161,7 @@ func headerRow(_ pill: String, _ pillColor: Color) -> some View {
 
 func captionView(_ s: String) -> some View {
     Text(s)
-        .font(.system(size: 10))
+        .font(.custom("Outfit", size: 10))
         .tracking(0.4)
         .foregroundStyle(cMuted)
         .frame(maxWidth: .infinity, alignment: .center)
@@ -106,7 +169,7 @@ func captionView(_ s: String) -> some View {
 
 func modelView(_ s: String) -> some View {
     Text(s)
-        .font(.system(size: 10))
+        .font(.custom("Outfit", size: 10))
         .tracking(0.55)
         .foregroundStyle(cMuted)
         .frame(maxWidth: .infinity, alignment: .center)
@@ -123,6 +186,32 @@ func sectionHead(_ title: String) -> some View {
     }
     .padding(.top, 16)
     .padding(.bottom, 8)
+}
+
+// Server base-URL editor: the same capsule language as the pills/buttons, in SF Mono
+// like every value on the card. Return or Apply commits (normalize + persist +
+// repoint the poller); while typing, the poller keeps the last committed URL.
+func urlFieldView() -> some View {
+    return VStack(spacing: 6) {
+        HStack(spacing: 8) {
+            TextField("http://192.168.1.13", text: Binding(
+                get: { strata.urlText },
+                set: { strata.urlText = $0 }
+            ))
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(cStrong)
+            .textFieldStyle(.plain)
+            .autocorrectionDisabled(true)
+            .onSubmit { commitURL() }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .background(Capsule()
+                .fill(cSurface.opacity(0.85))
+                .stroke(strata.urlError != nil ? cRed.opacity(0.5) : cBorder.opacity(0.55), lineWidth: 1))
+            ControlButton(label: "Apply", color: cBlue, action: commitURL)
+        }
+        captionView(strata.urlError ?? "\(hostLabel()) · metrics :\(metricsPort) · control :\(controlPort)")
+    }
 }
 
 // JSX `cpu_name.replace(/\s*\d+-Core Processor/, "")` — strip the suffix and
@@ -168,11 +257,19 @@ func downBody() -> some View {
         tabPillsRow()
         headerRow(pillText, dc)
         VStack(spacing: 10) {
-            captionView(starting ? "waiting for server to answer…" : "192.168.1.13:8080 unreachable")
-            ControlButton(label: "Start", color: cBlue, action: {
-                strata.startTsMs = nowMs() // press arms the spinner…
-                runControl(startURL) // …and fires the GET, fire-and-forget
-            })
+            captionView(starting ? "waiting for server to answer…" : "\(hostLabel()):\(metricsPort) unreachable")
+            HStack(spacing: 10) {
+                ControlButton(label: "Start Gyro-M", color: cBlue, action: {
+                    strata.startTsMs = nowMs() // press arms the spinner…
+                    runControl(startGyroMURL()) // …and fires the GET, fire-and-forget
+                })
+                ControlButton(label: "Start Coder", color: cBlue, action: {
+                    strata.startTsMs = nowMs() // press arms the spinner…
+                    runControl(startCoderURL()) // …and fires the GET, fire-and-forget
+                })
+            }
+            // While the server is unreachable, the Server tab still lets you fix the host.
+            if strata.tab == "server" { urlFieldView().padding(.top, 12) }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 16)
@@ -185,11 +282,22 @@ func serverBody(_ m: MetricsPayload) -> some View {
     return VStack(spacing: 0) {
         tabPillsRow()
         headerRow("● running", cGreen)
-        captionView("\(m.engine?.model ?? "") · control :8090")
+        captionView("\(m.engine?.model ?? "") · \(hostLabel()) · control :\(controlPort)")
             .padding(.top, 8)
-        ControlButton(label: "Stop", color: cRed, action: { runControl(stopURL) })
-            .frame(maxWidth: .infinity)
-            .padding(.top, 16)
+        HStack(spacing: 10) {
+            // Offer the *other* engine: a coder model up → start Gyro-M, and vice versa.
+            if ((m.engine?.model ?? "").lowercased().contains("coder")) {
+                ControlButton(label: "Start Gyro-M", color: cBlue, action: { runControl(startGyroMURL()) })
+            } else {
+                ControlButton(label: "Start Coder", color: cBlue, action: { runControl(startCoderURL()) })
+            }
+            ControlButton(label: "Stop", color: cRed, action: { runControl(stopURL()) })
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 16)
+        sectionHead("Server URL")
+        urlFieldView()
+            .padding(.bottom, 4)
     }
 }
 
@@ -372,10 +480,10 @@ struct StrataCard: View {
         ZStack(alignment: Alignment(horizontal: .center, vertical: .top)) {
             RoundedRectangle(cornerRadius: 16)
                 .fill(.linearGradient(colors: [
-                    hex("#0f172a").opacity(0.94), // slate-900
-                    hex("#020617").opacity(0.96), // slate-950 (OLED-dark)
+                    hex("#161a1d").opacity(0.94), // st-surface
+                    hex("#0e1113").opacity(0.96), // st-bg (OLED-dark)
                 ], startPoint: UnitPoint(x: 0.37, y: 0.06), endPoint: UnitPoint(x: 0.63, y: 0.94)))
-                .stroke(cWhite.opacity(0.08), lineWidth: 1)
+                .stroke(cBorder.opacity(0.55), lineWidth: 1)
             VStack(spacing: 0) {
                 if let m = strata.payload {
                     if strata.tab == "server" {

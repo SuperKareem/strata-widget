@@ -38,6 +38,14 @@
 
 **Color Notes:** Code dark + run green
 
+> **Note (widget vs web app):** the live app at `192.168.1.13:8080` is built on the
+> **Strata UI / Gainsty** token system (`web/tokens.css`), not the table above. The Swift
+> widget (`components.swift`) was re-skinned to match it, so its palette uses the web's
+> **dark-theme** tokens: `st-bg #0e1113`, `st-surface #161a1d`, `st-surface-2 #1d2226`,
+> `st-line #2a3036`, `st-ink #eef1f3`, `st-ink-muted #8e979f`, `st-accent #34d399` (green),
+> `st-danger #ff5a6e`, `st-warn #f5b53d`. Type: **Outfit** for UI text (SIL OFL, `fonts/Outfit.ttf`),
+> SF Mono for numeric readouts.
+
 ### Typography
 
 - **Heading Font:** Inter

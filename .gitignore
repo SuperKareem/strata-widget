@@ -1,0 +1,6 @@
+# Build artifact — rebuilt with:
+#   swiftc strata-app.swift components.swift payload.swift -o StrataWidget
+StrataWidget
+
+# macOS cruft
+.DS_Store

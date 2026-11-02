@@ -1,10 +1,8 @@
 import SwiftUI
 
-// MARK: - Palette — ui-ux-pro-max "Dark Mode (OLED)" design system
-// See design-system/strata-widget/MASTER.md. Slate-on-midnight: card #0F172A→#020617,
-// raised surface #1E293B, border #334155, text #F8FAFC, muted #94A3B8 (≥4.5:1 on the
-// card, so labels no longer need the old opacity(0.55) dimming hack), accent #3B82F6,
-// status green #22C55E, destructive #EF4444, warning #F59E0B.
+// MARK: - Palette — Strata UI "Gainsty" design system, dark theme tokens.
+// Mirrors the web app at :8080 (web/tokens.css, [data-theme="dark"]). The widget
+// always renders the dark theme, so the dark token values are inlined here.
 
 func hex(_ s: String, _ opacity: Double = 1) -> Color {
     let v = UInt32(String(s.dropFirst(1)), radix: 16) ?? 0
@@ -15,20 +13,27 @@ func hex(_ s: String, _ opacity: Double = 1) -> Color {
                  opacity: opacity)
 }
 
-let cBlue = hex("#3b82f6") // accent: data, active tab, progress
-let cRed = hex("#ef4444") // stop / server down / >90%
-let cAmber = hex("#f59e0b") // starting / >75%
-let cGreen = hex("#22c55e") // running / idle / <75%
-let cOrange = hex("#fb923c") // temp
-let cPurple = hex("#c084fc") // power
-let cText = hex("#f8fafc") // container text color
-let cStrong = hex("#f8fafc") // values (set in SF Mono)
-let cMuted = hex("#94a3b8") // labels/keys (slate-400, contrast-safe)
-let cDim = hex("#7d8c9f") // inactive pill text / footer
-let cBright = hex("#f8fafc") // active pill text
+let cBlue = hex("#34d399") // st-accent: data, active tab, progress (green on the web app)
+let cRed = hex("#ff5a6e") // st-danger: stop / server down / >90%
+let cAmber = hex("#f5b53d") // st-warn: starting / queued / >75%
+let cGreen = hex("#34d399") // st-accent: running / idle / <75%
+let cOrange = hex("#fb923c") // temp (no web token — kept)
+let cPurple = hex("#c084fc") // power (no web token — kept)
+let cText = hex("#eef1f3") // st-ink: container text color
+let cStrong = hex("#eef1f3") // values (st-ink, set in SF Mono)
+let cMuted = hex("#8e979f") // st-ink-muted: labels/keys
+let cDim = hex("#8e979f") // inactive pill text / footer (st-ink-muted)
+let cBright = hex("#eef1f3") // active pill text (st-ink)
 let cWhite = hex("#ffffff")
-let cSurface = hex("#1e293b") // raised surface (inactive pills)
-let cBorder = hex("#334155") // hairlines, dividers, pill outlines
+let cSurface = hex("#1d2226") // st-surface-2: raised surface (inactive pills, tab strip)
+let cBorder = hex("#2a3036") // st-line: hairlines, dividers, pill outlines
+
+// MARK: - Typography — Outfit (SIL OFL 1.1), the web app's face at :8080.
+// The web app uses Outfit for UI text and a monospace face for numeric readouts
+// (web/tokens.css: --st-font, --st-font-mono). Call sites use SwiftUI's own font
+// machinery — .font(.custom("Outfit", size:)).weight(...) — which correctly selects a
+// variable-face weight from the installed fonts/Outfit.ttf (SIL OFL) and falls back to
+// the system UI face if Outfit isn't installed. Monospaced call sites keep SF Mono.
 
 // JSX spinner string "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" — an array so spinFrame % 10 indexes it.
 let spinnerGlyphs = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -49,7 +54,7 @@ func headView(_ title: String) -> some View {
             .fill(cBlue.opacity(0.9))
             .frame(width: 3, height: 10)
         Text(title)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.custom("Outfit", size: 10)).fontWeight(.semibold)
             .tracking(1.2)
             .textCase(.uppercase)
             .foregroundStyle(cMuted)
@@ -108,7 +113,7 @@ func sparkView(_ data: [Double?], _ lo: Double?, _ hi: Double?, _ color: Color) 
 func rowView(label: String, value: String, data: [Double?], lo: Double?, hi: Double?, color: Color = cBlue) -> some View {
     HStack(spacing: 9) {
         Text(label)
-            .font(.system(size: 11))
+            .font(.custom("Outfit", size: 11))
             .foregroundStyle(cMuted)
             .frame(width: 52, alignment: .leading)
         sparkView(data, lo, hi, color)
@@ -124,7 +129,7 @@ func rowView(label: String, value: String, data: [Double?], lo: Double?, hi: Dou
 func kvView(key: String, value: String) -> some View {
     HStack {
         Text(key)
-            .font(.system(size: 11))
+            .font(.custom("Outfit", size: 11))
             .foregroundStyle(cMuted)
             .frame(maxWidth: .infinity, alignment: .leading)
         Text(value)
@@ -159,7 +164,7 @@ func barView(pct: Double, color: Color, width: Double = 92) -> some View {
 
 func pillView(text: String, active: Bool) -> some View {
     Text(text)
-        .font(.system(size: 10, weight: .bold))
+        .font(.custom("Outfit", size: 10)).fontWeight(.bold)
         .tracking(0.6)
         .foregroundStyle(active ? cBright : cDim)
         .padding(.vertical, 3)
@@ -173,7 +178,7 @@ func pillView(text: String, active: Bool) -> some View {
 
 func statusPillView(text: String, color: Color) -> some View {
     Text(text)
-        .font(.system(size: 10, weight: .semibold))
+        .font(.custom("Outfit", size: 10)).fontWeight(.semibold)
         .tracking(0.6)
         .foregroundStyle(color)
         .padding(.vertical, 3)
@@ -194,7 +199,7 @@ struct ControlButton: View {
     // defines both the capsule size and (via contentShape) the tap hit area.
     var body: some View {
         Text(label)
-            .font(.system(size: 11, weight: .semibold))
+            .font(.custom("Outfit", size: 11)).fontWeight(.semibold)
             .tracking(0.5)
             .foregroundStyle(color)
             .padding(.vertical, 6)
