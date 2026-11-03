@@ -1,21 +1,44 @@
 import SwiftUI
 import Foundation
+import AppKit
 
-// MARK: - Endpoints (JSX CMD + the control server on :8090)
+// MARK: - Endpoints (JSX CMD + the control server)
 // Not hardcoded: the Server tab edits one base URL (`scheme://host`), persisted in
-// UserDefaults, and every endpoint is derived from it — metrics on :8080, control
-// on :8090. The field accepts `192.168.1.13`, `http://host` or a full
+// UserDefaults, and every endpoint is derived from it. Metrics and control ports
+// are editable too (defaults 8080 / 8090), persisted per-port. The URL field
+// accepts `127.0.0.1`, `http://host` or a full
 // `http://host:8080/metrics`; the scheme/host is kept, path and port are replaced.
 
 // Own suite, so the value lands in ~/Library/Preferences/com.strata.widget.plist
 // rather than the global domain (this binary has no bundle identifier).
 let strataDefaults = UserDefaults(suiteName: "com.strata.widget")!
 let baseURLKey = "strata.baseURL"
-let defaultBaseURL = "http://192.168.1.13"
-let metricsPort = 8080
-let controlPort = 8090
+let defaultBaseURL = "http://127.0.0.1"
+let defaultMetricsPort = 8080
+let defaultControlPort = 8091
 
 let apiKey = "strata" // server --api-key; every request carries it as Authorization: Bearer
+
+// Parse the launch flags so the widget can be pointed at a host/ports from the
+// command line, e.g.
+//   open StrataWidget --server-url=127.0.0.1 --strata-port=8080 --control-port=8091
+// CLI values override UserDefaults (which overrides the built-in defaults).
+// Only the keys that are actually present are returned (nil = not passed).
+func parseServerArgs() -> (baseURL: String?, metricsPort: Int?, controlPort: Int?) {
+    var base: String? = nil
+    var metrics: Int? = nil
+    var control: Int? = nil
+    for arg in CommandLine.arguments {
+        if arg.hasPrefix("--server-url=") {
+            base = String(arg.dropFirst("--server-url=".count))
+        } else if arg.hasPrefix("--strata-port=") {
+            metrics = Int(arg.dropFirst("--strata-port=".count))
+        } else if arg.hasPrefix("--control-port=") {
+            control = Int(arg.dropFirst("--control-port=".count))
+        }
+    }
+    return (base, metrics, control)
+}
 
 // nil when the text can't name a host; the caller keeps the draft visible instead.
 func normalizeBase(_ raw: String) -> String? {
@@ -25,7 +48,7 @@ func normalizeBase(_ raw: String) -> String? {
     if !lowered.hasPrefix("http://") && !lowered.hasPrefix("https://") { s = "http://" + s }
     guard var c = URLComponents(string: s), let host = c.host, !host.isEmpty else { return nil }
     c.path = "" // endpoints append their own path
-    c.port = nil // metrics/control ports are fixed
+    c.port = nil // ports are editable via the port fields below
     c.query = nil
     c.fragment = nil
     return c.url?.absoluteString
@@ -38,13 +61,13 @@ func endpoint(_ path: String, port: Int) -> String? {
     return c.url?.absoluteString
 }
 
-func metricsURL() -> String? { endpoint("/metrics", port: metricsPort) }
-func controlURL(_ cmd: String) -> String? { endpoint("/\(cmd)", port: controlPort) }
+func metricsURL() -> String? { endpoint("/metrics", port: strata.metricsPort) }
+func controlURL(_ cmd: String) -> String? { endpoint("/\(cmd)", port: strata.controlPort) }
 func startCoderURL() -> String? { controlURL("start-coder") }
 func startGyroMURL() -> String? { controlURL("start-gyro") }
 func stopURL() -> String? { controlURL("stop") }
 
-// Host-only view of the base URL for captions ("192.168.1.13:8080 unreachable").
+// Host-only view of the base URL for captions ("127.0.0.1:8080 unreachable").
 func hostLabel() -> String {
     if let c = URLComponents(string: strata.baseURL), let host = c.host, !host.isEmpty { return host }
     return strata.baseURL
@@ -94,9 +117,26 @@ func runControl(_ url: String?) { Task { _ = await fetchBody(url) } }
     var spinFrame = 0
     // Persisted server base URL; urlText is the field's live draft, so typing
     // mid-edit never repoints the poller.
-    var baseURL: String = strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
-    var urlText: String = strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
+    // CLI flags (parseServerArgs) override UserDefaults, which overrides the
+    // built-in defaults. CLI wins so each alias can point at its own server.
+    var baseURL: String = parseServerArgs().baseURL ?? strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
+    var urlText: String = parseServerArgs().baseURL ?? strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
     var urlError: String? = nil
+    // Ports are editable now (were hardcoded). Draft text lets the user type
+    // without repointing the poller until they commit.
+    var metricsPort: Int = {
+        if let p = parseServerArgs().metricsPort, (1..<65536).contains(p) { return p }
+        let v = strataDefaults.integer(forKey: "strata.metricsPort")
+        return v == 0 ? defaultMetricsPort : v
+    }()
+    var controlPort: Int = {
+        if let p = parseServerArgs().controlPort, (1..<65536).contains(p) { return p }
+        let v = strataDefaults.integer(forKey: "strata.controlPort")
+        return v == 0 ? defaultControlPort : v
+    }()
+    var metricsPortText: String = parseServerArgs().metricsPort.map(String.init) ?? String(defaultMetricsPort)
+    var controlPortText: String = parseServerArgs().controlPort.map(String.init) ?? String(defaultControlPort)
+    var portError: String? = nil
 }
 let strata = StrataState()
 
@@ -115,6 +155,21 @@ func commitURL() {
         strata.payload = nil
         strata.startTsMs = nil
     }
+}
+
+// Commit the port drafts (Return / Apply): validate 1..<65536, persist, and
+// repoint the poller + control endpoints at the new ports.
+func commitPorts() {
+    var changed = false
+    if let p = Int(strata.metricsPortText), (1..<65536).contains(p) {
+        if p != strata.metricsPort { strata.metricsPort = p; changed = true }
+        strataDefaults.set(p, forKey: "strata.metricsPort")
+    } else { strata.portError = "bad metrics port" }
+    if let p = Int(strata.controlPortText), (1..<65536).contains(p) {
+        if p != strata.controlPort { strata.controlPort = p; changed = true }
+        strataDefaults.set(p, forKey: "strata.controlPort")
+    } else { strata.portError = "bad control port" }
+    if changed { strata.payload = nil; strata.startTsMs = nil }
 }
 
 // The poller replaces refreshFrequency=1000 + curl -m 3: one long-running Task
@@ -188,30 +243,155 @@ func sectionHead(_ title: String) -> some View {
     .padding(.bottom, 8)
 }
 
-// Server base-URL editor: the same capsule language as the pills/buttons, in SF Mono
-// like every value on the card. Return or Apply commits (normalize + persist +
-// repoint the poller); while typing, the poller keeps the last committed URL.
-func urlFieldView() -> some View {
-    return VStack(spacing: 6) {
-        HStack(spacing: 8) {
-            TextField("http://192.168.1.13", text: Binding(
-                get: { strata.urlText },
-                set: { strata.urlText = $0 }
-            ))
+// Server editor dialog: the base-URL field plus the metrics/control ports, with
+// Save (commit + close) and Cancel (close, keep last committed values). Shown in
+// its own window via openServerDialog() so the fields can capture keyboard.
+// The URL field is bound to @FocusState via a token, so opening the window hands
+// keyboard focus to it (the card's hidden-title-bar window never did).
+struct ServerDialogView: View {
+    @FocusState private var focusURL: Bool
+
+    var body: some View {
+        VStack(spacing: 14) {
+            VStack(spacing: 6) {
+                Text("SERVER URL".uppercased())
+                    .font(.system(size: 8, design: .monospaced))
+                    .tracking(0.5)
+                    .foregroundStyle(cMuted)
+                TextField("http://127.0.0.1", text: Binding(
+                    get: { strata.urlText },
+                    set: { strata.urlText = $0 }
+                ))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(cStrong)
+                .textFieldStyle(.plain)
+                .autocorrectionDisabled(true)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(Color(cSurface).opacity(0.85))
+                .overlay(
+                    Capsule()
+                        .stroke(cBorder.opacity(0.55), lineWidth: 1)
+                )
+                .focused($focusURL)
+            }
+            portRowView()
+            HStack(spacing: 8) {
+                ControlButton(label: "Cancel", color: cMuted, action: { closeServerDialog() })
+                ControlButton(label: "Save", color: cBlue, action: {
+                    commitURL()
+                    commitPorts()
+                    closeServerDialog()
+                })
+            }
+        }
+        .padding(20)
+        // The window is key by the time this fires; a short delay lets the
+        // field become first responder so typing works immediately on open.
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                focusURL = true
+            }
+        }
+    }
+}
+
+// Close the editor window (if open) and drop the reference. Called by the
+// dialog's Cancel / Save buttons. The card stays visible: we only close the
+// editor, then re-activate the app so focus returns to the widget card.
+func closeServerDialog() {
+    let editor = serverDialogWindow
+    if let w = editor { w.close() }
+    serverDialogWindow = nil
+    // The card may have lost key status while the editor was open; bring it back.
+    if let card = NSApp.windows.first(where: { $0 != editor }) {
+        card.orderFrontRegardless()
+    }
+    NSApp.activate(ignoringOtherApps: true)
+}
+
+// Open the server editor in its own normal window. The card window uses a hidden
+// title bar and does not capture keyboard, so the text fields need a real window
+// that becomes key and hands focus to the first field. Single editor at a time:
+// close any existing one first.
+var serverDialogWindow: NSWindow? = nil
+
+func openServerDialog() {
+    if let existing = serverDialogWindow {
+        existing.close()
+        serverDialogWindow = nil
+    }
+    let window = NSWindow()
+    let hosting = NSHostingController(rootView: ServerDialogView())
+    window.contentViewController = hosting
+    window.styleMask = [.titled, .closable]
+    window.title = "Strata · Server"
+    window.setContentSize(NSSize(width: 360, height: 240))
+    window.center()
+    window.level = .normal
+    window.makeKeyAndOrderFront(nil)
+    serverDialogWindow = window
+    // Activate the app so the editor becomes key; the URL field's @FocusState
+    // fires via .onAppear and typing works immediately on open.
+    NSApp.activate(ignoringOtherApps: true)
+}
+
+// A single labeled port field: small uppercase key above a monospaced capsule.
+func portField(_ label: String, _ text: Binding<String>, _ commit: @escaping () -> Void) -> some View {
+    return VStack(spacing: 4) {
+        Text(label.uppercased())
+            .font(.system(size: 8, design: .monospaced))
+            .tracking(0.5)
+            .foregroundStyle(cMuted)
+        TextField("8080", text: text)
             .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(cStrong)
             .textFieldStyle(.plain)
             .autocorrectionDisabled(true)
-            .onSubmit { commitURL() }
+            .multilineTextAlignment(.trailing)
+            .submitLabel(.done)
+            .onSubmit { commit() }
             .padding(.vertical, 6)
-            .padding(.horizontal, 10)
-            .background(Capsule()
-                .fill(cSurface.opacity(0.85))
-                .stroke(strata.urlError != nil ? cRed.opacity(0.5) : cBorder.opacity(0.55), lineWidth: 1))
-            ControlButton(label: "Apply", color: cBlue, action: commitURL)
-        }
-        captionView(strata.urlError ?? "\(hostLabel()) · metrics :\(metricsPort) · control :\(controlPort)")
+            .padding(.horizontal, 8)
+            .background(Color(cSurface).opacity(0.85))
+            .overlay(
+                Capsule()
+                    .stroke(cBorder.opacity(0.55), lineWidth: 1)
+            )
     }
+    .frame(maxWidth: .infinity)
+}
+
+// Two port fields (metrics / control) alongside the base-URL field.
+func portRowView() -> some View {
+    return HStack(spacing: 8) {
+        portField("metrics", Binding(
+            get: { strata.metricsPortText },
+            set: { strata.metricsPortText = $0 }
+        ), commitPorts)
+        portField("control", Binding(
+            get: { strata.controlPortText },
+            set: { strata.controlPortText = $0 }
+        ), commitPorts)
+    }
+}
+
+// The server URL shown as a capsule button with a transparent background. It
+// renders the live (committed) URL; clicking does nothing — the URL is edited
+// through the "Change Server" flow, not from here. Kept as a Button for layout
+// parity with the other capsule controls.
+func serverURLButton() -> some View {
+    return Button(strata.baseURL) {
+        // no-op: the URL is edited through the "Change Server" flow
+    }
+    .buttonStyle(.plain)
+    .font(.system(size: 11, design: .monospaced))
+    .foregroundStyle(cStrong)
+    .padding(.vertical, 6)
+    .padding(.horizontal, 10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Capsule().fill(Color.clear))
+    .overlay(Capsule().stroke(cBorder.opacity(0.55), lineWidth: 1))
 }
 
 // JSX `cpu_name.replace(/\s*\d+-Core Processor/, "")` — strip the suffix and
@@ -257,7 +437,7 @@ func downBody() -> some View {
         tabPillsRow()
         headerRow(pillText, dc)
         VStack(spacing: 10) {
-            captionView(starting ? "waiting for server to answer…" : "\(hostLabel()):\(metricsPort) unreachable")
+            captionView(starting ? "waiting for server to answer…" : "\(hostLabel()):\(strata.metricsPort) unreachable")
             HStack(spacing: 10) {
                 ControlButton(label: "Start Gyro-M", color: cBlue, action: {
                     strata.startTsMs = nowMs() // press arms the spinner…
@@ -268,8 +448,10 @@ func downBody() -> some View {
                     runControl(startCoderURL()) // …and fires the GET, fire-and-forget
                 })
             }
-            // While the server is unreachable, the Server tab still lets you fix the host.
-            if strata.tab == "server" { urlFieldView().padding(.top, 12) }
+            // While the server is unreachable, the Server tab still shows the URL.
+            if strata.tab == "server" {
+                serverURLButton()
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 16)
@@ -282,7 +464,7 @@ func serverBody(_ m: MetricsPayload) -> some View {
     return VStack(spacing: 0) {
         tabPillsRow()
         headerRow("● running", cGreen)
-        captionView("\(m.engine?.model ?? "") · \(hostLabel()) · control :\(controlPort)")
+        captionView("\(m.engine?.model ?? "") · \(hostLabel()) · control :\(strata.controlPort)")
             .padding(.top, 8)
         HStack(spacing: 10) {
             // Offer the *other* engine: a coder model up → start Gyro-M, and vice versa.
@@ -296,8 +478,7 @@ func serverBody(_ m: MetricsPayload) -> some View {
         .frame(maxWidth: .infinity)
         .padding(.top, 16)
         sectionHead("Server URL")
-        urlFieldView()
-            .padding(.bottom, 4)
+        serverURLButton()
     }
 }
 
