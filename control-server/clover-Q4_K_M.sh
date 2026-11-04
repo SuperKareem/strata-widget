@@ -20,6 +20,9 @@ CONFIG=strata-clover-q4_k_m.json
 LOG="$POLY/strata-clover-q4_k_m.log"
 PIDFILE="$HERE/server.pid"
 KEY=strata
+# Printed LAN endpoint: the server's own primary address, so no personal address is committed.
+LAN=${LAN:-$(hostname -I 2>/dev/null | cut -d' ' -f1)}
+LAN=${LAN:-0.0.0.0}
 
 [ -x "$POLY/.venv/bin/python" ] || { echo "missing venv: $POLY/.venv/bin/python"; exit 1; }
 [ -f "$POLY/$CONFIG" ] || { echo "missing config: $POLY/$CONFIG"; exit 1; }
@@ -52,7 +55,7 @@ disown 2>/dev/null || true
 i=0
 while [ "$i" -lt 40 ]; do
     if curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" | grep -q '"loaded"'; then
-        echo "ready: http://0.0.0.0:$PORT/  (LAN: http://192.168.1.6:$PORT/v1, key: $KEY)"
+        echo "ready: http://0.0.0.0:$PORT/  (LAN: http://$LAN:$PORT/v1, key: $KEY)"
         echo "log:   $LOG"
         exit 0
     fi

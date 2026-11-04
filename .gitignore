@@ -18,3 +18,4 @@ control-server/__pycache__/
 control-server/mtp-tune/__pycache__/
 control-server/mtp-tune/*.out
 control-server/mtp-tune/*.log
+control-server/mtp-tune/*.tsv

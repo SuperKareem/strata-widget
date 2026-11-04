@@ -22,6 +22,9 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=/home/kareem/Documents/Strata-v02x
 PORT=8080
 KEY=strata
+# Printed LAN endpoint: the server's own primary address, so no personal address is committed.
+LAN=${LAN:-$(hostname -I 2>/dev/null | cut -d' ' -f1)}
+LAN=${LAN:-0.0.0.0}
 LOG="$REPO/strata-gyro-m.log"
 
 [ -x "$REPO/start-gyro.sh" ] || { echo "missing repo script: $REPO/start-gyro.sh"; exit 1; }
@@ -53,4 +56,4 @@ rc=$?
 echo "log:   $LOG"
 curl -s -m 3 -H "Authorization: Bearer $KEY" "http://127.0.0.1:$PORT/v1/models" |
     grep -o '"id": *"[^"]*"' | head -1
-echo "LAN:   http://192.168.1.13:$PORT/v1, key: $KEY"
+echo "LAN:   http://$LAN:$PORT/v1, key: $KEY"

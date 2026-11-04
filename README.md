@@ -1,6 +1,6 @@
-# Strata Desk Widget
+# Strata Desktop Widget
 
-A small always-on-top macOS desk widget that watches a local **Strata** inference
+A small always-on-top macOS desktop widget that watches a local **Strata** inference
 server: live decode speed, GPU/VRAM/temp/power, CPU/RAM/disk, prompt-read progress,
 and the last request's stats — plus a **Server** tab to stop the engine and launch
 another model.
@@ -9,7 +9,7 @@ another model.
 |---|---|
 | ![Strata widget — Metrics tab](docs/screenshots/metrics.png) | ![Strata widget — Server tab](docs/screenshots/server.png) |
 
-**This is my personal tool.** I built it for my own desk setup — two machines, two
+**This is my personal tool.** I built it for my own setup — two machines, two
 servers, several models per machine — and it is shaped around how I actually run
 things. That said: **anyone is free to use it and modify it however they need.**
 It is MIT-licensed (see [License](#license)); there is no warranty, no support
@@ -37,7 +37,7 @@ The widget talks to **two HTTP servers on the same host**:
 
 ```
         ┌──────────────────────────────┐
-        │   The Strata server machine  │  (Linux box, e.g. 192.168.1.13)
+        │   The Strata server machine  │  (Linux box)
         │                              │
         │  :8080  Strata  → /metrics   │  ← polled every 1s by the widget
         │  :8090  control → /models    │  ← polled every 5s
@@ -120,8 +120,8 @@ The widget is `LSUIElement` — no Dock icon. **Right-click the card to quit.**
 
 ```sh
 open -n ./StrataWidget.app --args \
-  --instance=deskstrata \
-  --server-url=192.168.1.13 \
+  --instance=StrataWidget1 \
+  --server-url=127.0.0.1 \
   --strata-port=8080 \
   --control-port=8090 \
   --api-key=strata
@@ -143,14 +143,18 @@ suite, and two unprefixed launches sharing window state is a known crash path.
 
 ### Two servers at once
 
-I run one card per machine. `~/.zshrc`:
+Run one card per machine: give each launch its own `--instance` and `--server-url`.
 
 ```sh
-alias deskstrata='open -n ~/Documents/swift-projects/strata-desk-widget/swift-widget/StrataWidget.app --args --instance=deskstrata --server-url=192.168.1.13 --strata-port=8080 --control-port=8090 --api-key=strata'
-alias alienpoly='open -n ~/Documents/swift-projects/strata-desk-widget/swift-widget/StrataWidget.app --args --instance=alienpoly --server-url=10.0.0.2 --strata-port=8090 --control-port=8092 --api-key=strata'
+open -n ./StrataWidget.app --args \
+  --instance=StrataWidget2 \
+  --server-url=<second-host> \
+  --strata-port=8080 \
+  --control-port=8090 \
+  --api-key=strata
 ```
 
-`-n` is what allows the second instance to launch a second process from the same bundle.
+`-n` is what allows the second instance to launch a second process from the same bundle. Adjust ports if your other server listens elsewhere.
 
 ## Using the widget
 

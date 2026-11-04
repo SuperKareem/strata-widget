@@ -18,6 +18,9 @@ PROFILE="$HERE/coder-dflash2-15.json"
 CLI=/home/kareem/.local/bin/strata
 PORT=8080
 KEY=strata
+# Printed LAN endpoint: the server's own primary address, so no personal address is committed.
+LAN=${LAN:-$(hostname -I 2>/dev/null | cut -d' ' -f1)}
+LAN=${LAN:-0.0.0.0}
 PIDFILE="$HERE/server.pid"
 OUT="$HERE/server.out"
 LOG=/home/kareem/Documents/Strata-v02x/strata-coder-iq1_m-dflash2-15.log
@@ -43,7 +46,7 @@ disown 2>/dev/null || true
 i=0
 while [ "$i" -lt 180 ]; do
     if curl -sf -m 2 -H "Authorization: Bearer $KEY" "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
-        echo "ready: http://0.0.0.0:$PORT/  (LAN: http://192.168.1.13:$PORT/v1, key: $KEY)"
+        echo "ready: http://0.0.0.0:$PORT/  (LAN: http://$LAN:$PORT/v1, key: $KEY)"
         echo "log:   $LOG"
         grep -h "engine started" "$LOG" 2>/dev/null | tail -1 | cut -c1-200
         grep -h "hipBLASLt tuning enabled" "$LOG" 2>/dev/null | tail -1

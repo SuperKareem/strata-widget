@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Builds StrataWidget.app (real bundle: proper LaunchServices/defaults identity).
 # Launch instances with distinct --instance ids so parallel widgets stay isolated:
-#   open -n ./StrataWidget.app --args --instance=deskstrata --server-url=192.168.1.13 --strata-port=8080 --control-port=8090
+#   open -n ./StrataWidget.app --args --instance=StrataWidget1 --server-url=<lan-address> --strata-port=8080 --control-port=8090
 set -e
 cd "$(dirname "$0")"
 APP=StrataWidget.app

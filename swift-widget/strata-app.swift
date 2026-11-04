@@ -81,7 +81,7 @@ func normalizeBase(_ raw: String) -> String? {
     return c.url?.absoluteString
 }
 
-// Bare hosts from CLI flags / stored values: "--server-url=192.168.1.13" must
+// Bare hosts from CLI flags / stored values: "--server-url=192.168.1.20" must
 // become a real URL, otherwise URLComponents yields "//:8080/metrics" and curl
 // refuses it, so the card reads "server down" against a live server.
 func configuredBaseURL() -> String {
