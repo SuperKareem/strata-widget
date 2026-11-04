@@ -1,0 +1,5 @@
+temperature 0.7, doc doc_160000, base minp0.5
+minp0.40  n= 18 median=  48.6 tok/s accept=0.65 | paired -0.90% (se 1.36, n=18) tie
+minp0.50  n= 18 median=  50.8 tok/s accept=0.71
+minp0.60  n= 18 median=  47.0 tok/s accept=0.75 | paired -4.53% (se 1.89, n=18) loses
+minp0.65  n= 18 median=  44.9 tok/s accept=0.80 | paired -3.78% (se 2.05, n=18) tie

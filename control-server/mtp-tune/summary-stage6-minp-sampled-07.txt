@@ -1,0 +1,5 @@
+temperature 0.7, doc clean_155k, base minp0.5
+minp0.40  n= 18 median=  46.6 tok/s accept=0.62 | paired +2.68% (se 2.20, n=18) tie
+minp0.50  n= 18 median=  47.2 tok/s accept=0.68
+minp0.60  n= 18 median=  48.9 tok/s accept=0.74 | paired +0.47% (se 1.91, n=18) tie
+minp0.65  n= 18 median=  45.9 tok/s accept=0.79 | paired -0.57% (se 2.09, n=18) tie

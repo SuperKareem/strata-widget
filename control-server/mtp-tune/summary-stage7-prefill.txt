@@ -1,0 +1,11 @@
+curve target=  4000 pipe=None   n=4 prompt_n=3617-4536 median  1088.6 tok/s (min 1005.0 max 1141.9), TTFT   4004 ms (min 3353 max 4187)
+curve target= 16000 pipe=None   n=3 prompt_n=16884-17953 median  1381.3 tok/s (min 1375.6 max 1432.8), TTFT  12497 ms (min 12259 max 13096)
+curve target= 48000 pipe=None   n=2 prompt_n=44160-49339 median  1538.5 tok/s (min 1509.8 max 1538.5), TTFT  32731 ms (min 28754 max 32731)
+curve target=117000 pipe=None   n=2 prompt_n=110745-115098 median  1572.3 tok/s (min 1562.5 max 1572.3), TTFT  73745 ms (min 70525 max 73745)
+pipe target= 32000 pipe=0.0    n=3 prompt_n=35953-36836 median  1551.3 tok/s (min 1545.5 max 1553.1), TTFT  23709 ms (min 23246 max 23760)
+pipe target= 32000 pipe=1.0    n=3 prompt_n=29801-35594 median  1548.3 tok/s (min 1532.6 max 1585.5), TTFT  20339 ms (min 19290 max 23266)
+pipe target= 32000 pipe=4096.0 n=3 prompt_n=22884-31900 median  1488.6 tok/s (min 1420.1 max 1533.7), TTFT  19880 ms (min 16155 max 21478)
+pipe target= 32000 pipe=None   n=3 prompt_n=28305-37902 median  1520.4 tok/s (min 1497.4 max 1584.1), TTFT  23984 ms (min 18660 max 24463)
+pipe 0.0 vs default: +1.10% (se 1.69, n=3) tie
+pipe 1.0 vs default: +1.43% (se 1.01, n=3) tie
+pipe 4096.0 vs default: -3.44% (se 2.17, n=3) tie

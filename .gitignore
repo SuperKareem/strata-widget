@@ -7,3 +7,14 @@ StrataWidget
 
 # Compiled app bundle (rebuilt from swift-widget/ sources)
 *.app
+
+# control-server runtime artifacts
+control-server/*.out
+control-server/*.log
+control-server/*.pid
+control-server/*.port
+control-server/*.bak-*
+control-server/__pycache__/
+control-server/mtp-tune/__pycache__/
+control-server/mtp-tune/*.out
+control-server/mtp-tune/*.log

@@ -1,0 +1,7 @@
+base = base: median 51.8 tok/s (n=18), prefill 1548.5 tok/s
+floor1024      n= 18 median=  53.1 tok/s accept=0.75 | base   51.8 accept=0.75 | prefill 1546.3 vs 1548.5 | reused  69260 vs  69260 tok/round, wall   120 vs   114 s
+               cache end: {'parked': 1, 'cache_MiB': 1803, 'parks': 11, 'restores': 0, 'evictions': 9, 'requests_reused': 18, 'reused_tokens': 1246685, 'budget_mib': 8192, 'vram_free_mib': 466}
+               base  end: {'parked': 0, 'cache_MiB': 0, 'parks': 0, 'restores': 0, 'evictions': 0, 'requests_reused': 18, 'reused_tokens': 1246685, 'budget_mib': 8192, 'vram_free_mib': 464} | paired +1.88% (se 1.57, n=18) tie
+base-repeat    n=  6 median=  51.7 tok/s accept=0.73 | base   51.8 accept=0.75 | prefill 1556.9 vs 1548.5 | reused  69263 vs  69260 tok/round, wall    38 vs    38 s
+               cache end: {'parked': 0, 'cache_MiB': 0, 'parks': 0, 'restores': 0, 'evictions': 0, 'requests_reused': 6, 'reused_tokens': 415577, 'budget_mib': 8192, 'vram_free_mib': 464}
+               base  end: {'parked': 0, 'cache_MiB': 0, 'parks': 0, 'restores': 0, 'evictions': 0, 'requests_reused': 18, 'reused_tokens': 1246685, 'budget_mib': 8192, 'vram_free_mib': 464} | paired -1.30% (se 2.87, n=6) tie

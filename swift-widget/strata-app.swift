@@ -35,17 +35,22 @@ let defaultBaseURL = "http://127.0.0.1"
 let defaultMetricsPort = 8080
 let defaultControlPort = 8091
 
-let apiKey = "strata" // server --api-key; every request carries it as Authorization: Bearer
+// The server's --api-key, sent as Authorization: Bearer on every request. Not a
+// security boundary — see README. Empty means "no auth": the header is omitted.
+// The built-in default stays "strata" so existing launches need no new flag.
+let apiKeyKey = "strata.apiKey"
+let defaultApiKey = "strata"
 
 // Parse the launch flags so the widget can be pointed at a host/ports from the
 // command line, e.g.
 //   open StrataWidget --server-url=127.0.0.1 --strata-port=8080 --control-port=8091
 // CLI values override UserDefaults (which overrides the built-in defaults).
 // Only the keys that are actually present are returned (nil = not passed).
-func parseServerArgs() -> (baseURL: String?, metricsPort: Int?, controlPort: Int?) {
+func parseServerArgs() -> (baseURL: String?, metricsPort: Int?, controlPort: Int?, apiKey: String?) {
     var base: String? = nil
     var metrics: Int? = nil
     var control: Int? = nil
+    var key: String? = nil
     for arg in CommandLine.arguments {
         if arg.hasPrefix("--server-url=") {
             base = String(arg.dropFirst("--server-url=".count))
@@ -53,9 +58,13 @@ func parseServerArgs() -> (baseURL: String?, metricsPort: Int?, controlPort: Int
             metrics = Int(arg.dropFirst("--strata-port=".count))
         } else if arg.hasPrefix("--control-port=") {
             control = Int(arg.dropFirst("--control-port=".count))
+        } else if arg.hasPrefix("--api-key=") {
+            // Present-but-empty (--api-key=) is a deliberate "no auth", so this
+            // stays nil-differentiated from "flag not passed".
+            key = String(arg.dropFirst("--api-key=".count))
         }
     }
-    return (base, metrics, control)
+    return (base, metrics, control, key)
 }
 
 // nil when the text can't name a host; the caller keeps the draft visible instead.
@@ -126,8 +135,9 @@ func nowMs() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
 // route is bypassed on purpose — /usr/bin/curl carries the Authorization header
 // and does the request. (The old system(3) call is gone: the macOS SDK marks
 // `system` unavailable in Swift, and Foundation.Process is the supported way to
-// spawn a child process.) Verified live: `Bearer strata` → 200 on :8080/metrics,
-// missing key → 401. curl -m 3 mirrors the JSX timeout.
+// spawn a child process.) The bearer key comes from strata.apiKey (CLI / dialog /
+// UserDefaults). Verified live: `Bearer strata` → 200 on :8080/metrics, missing
+// key → 401. curl -m 3 mirrors the JSX timeout.
 
 func fetchBody(_ url: String?) async -> String? {
     guard let url, let target = URL(string: url) else { return nil }
@@ -137,9 +147,14 @@ func fetchBody(_ url: String?) async -> String? {
     defer { _ = remove(tmp) } // unlink after the read below
     let curl = Process()
     curl.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-    curl.arguments = ["-s", "-m", "3",
-                      "-H", "Authorization: Bearer \(apiKey)",
-                      "-o", tmp, url]
+    var args = ["-s", "-m", "3"]
+    // An empty key means "this server needs no auth"; sending `Bearer ` with an
+    // empty token is worse than sending nothing (Strata answers 401 for it).
+    if !strata.apiKey.isEmpty {
+        args += ["-H", "Authorization: Bearer \(strata.apiKey)"]
+    }
+    args += ["-o", tmp, url]
+    curl.arguments = args
     do {
         try curl.run()
     } catch {
@@ -180,6 +195,10 @@ func runControl(_ url: String?) { Task { _ = await fetchBody(url) } }
     var metricsPortText: String = parseServerArgs().metricsPort.map(String.init) ?? String(defaultMetricsPort)
     var controlPortText: String = parseServerArgs().controlPort.map(String.init) ?? String(defaultControlPort)
     var portError: String? = nil
+    // Bearer key. Same precedence as the URL/ports: CLI → UserDefaults → default.
+    // apiKeyText is the dialog's live draft; the header uses `apiKey` only.
+    var apiKey: String = parseServerArgs().apiKey ?? strataDefaults.string(forKey: apiKeyKey) ?? defaultApiKey
+    var apiKeyText: String = parseServerArgs().apiKey ?? strataDefaults.string(forKey: apiKeyKey) ?? defaultApiKey
     // Model whose Launch was pressed and is still loading. Loading a model
     // restarts the engine, so /metrics goes down then comes back up; the spinner
     // clears the moment metrics returns (launchSawDown flips while it is nil), so
@@ -191,6 +210,11 @@ func runControl(_ url: String?) { Task { _ = await fetchBody(url) } }
     var launchSawDown = false
 }
 let strata = StrataState()
+
+// Which tab body the card renders, as one string. Read inside StrataCard's body, so
+// SwiftUI observes both `payload` and `tab`; a single value means one `.animation`
+// drives every content swap (tab click, server up, server down).
+var strataBodyKey: String { strata.payload == nil ? "down" : strata.tab }
 
 // Commit the field on Return / Apply: normalize, persist, repoint the poller, and
 // drop the stale payload so the card re-reads from the new host right away.
@@ -222,6 +246,19 @@ func commitPorts() {
         strataDefaults.set(p, forKey: "strata.controlPort")
     } else { strata.portError = "bad control port" }
     if changed { strata.payload = nil; strata.launchingId = nil }
+}
+
+// Commit the key draft (Save / Return): persist and re-poll, since a wrong key
+// yields 401 rather than a parse failure, so the card would otherwise keep
+// showing the stale payload from the key that happened to work at launch.
+func commitApiKey() {
+    let key = strata.apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
+    if key != strata.apiKey {
+        strata.apiKey = key
+        strataDefaults.set(key, forKey: apiKeyKey)
+        strata.payload = nil
+        strata.launchingId = nil
+    }
 }
 
 // The poller replaces refreshFrequency=1000 + curl -m 3: one long-running Task
@@ -263,6 +300,9 @@ func startPolling() {
 
 // MARK: - Small view helpers
 
+// Lives in StrataCard rather than in each tab body: hoisting it keeps the pill row
+// the same view across a tab switch, so only the content below cross-fades and the
+// pills animate their own active state instead of fading out and back in.
 func tabPillsRow() -> some View {
     HStack(spacing: 6) {
         pillView(text: "Metrics", active: strata.tab == "metrics")
@@ -318,13 +358,16 @@ func sectionHead(_ title: String) -> some View {
     .padding(.bottom, 8)
 }
 
-// Server editor dialog: the base-URL field plus the metrics/control ports, with
-// Save (commit + close) and Cancel (close, keep last committed values). Shown in
-// its own window via openServerDialog() so the fields can capture keyboard.
+// Server editor dialog: the base-URL field, the bearer key, and the metrics/control
+// ports, with Save (commit + close) and Cancel (close, keep last committed values).
+// Shown in its own window via openServerDialog() so the fields can capture keyboard.
 // The URL field is bound to @FocusState via a token, so opening the window hands
 // keyboard focus to it (the card's hidden-title-bar window never did).
 struct ServerDialogView: View {
     @FocusState private var focusURL: Bool
+    @FocusState private var focusKey: Bool
+    @FocusState private var focusMetrics: Bool
+    @FocusState private var focusControl: Bool
 
     var body: some View {
         VStack(spacing: 14) {
@@ -344,17 +387,17 @@ struct ServerDialogView: View {
                 .padding(.vertical, 6)
                 .padding(.horizontal, 10)
                 .background(Color(cSurface).opacity(0.85))
-                .overlay(
-                    Capsule()
-                        .stroke(cBorder.opacity(0.55), lineWidth: 1)
-                )
+                .overlay(fieldStroke(focused: focusURL))
+                .animation(motion, value: focusURL)
                 .focused($focusURL)
             }
-            portRowView()
+            apiKeyRowView(focusKey: $focusKey)
+            portRowView(focusMetrics: $focusMetrics, focusControl: $focusControl)
             HStack(spacing: 8) {
                 ControlButton(label: "Cancel", color: cMuted, action: { closeServerDialog() })
                 ControlButton(label: "Save", color: cBlue, action: {
                     commitURL()
+                    commitApiKey()
                     commitPorts()
                     closeServerDialog()
                 })
@@ -371,15 +414,18 @@ struct ServerDialogView: View {
     }
 }
 
-// Close the editor window (if open) and drop the reference. Called by the
-// dialog's Cancel / Save buttons. The card stays visible: we only close the
-// editor, then re-activate the app so focus returns to the widget card.
+// Hide the editor window and hand key status back to the card. Called by the
+// dialog's Cancel / Save buttons.
+//
+// The window is hidden, not closed: its NSHostingController stays alive for the next
+// open. Releasing a hosting controller whose view is still attached to a window (or
+// mid-click) corrupts the main thread's autorelease pool, which shows up as an
+// objc_release SIGSEGV when the run loop later drains it — exactly the crash seen
+// when Save/Cancel closes the widget.
 func closeServerDialog() {
-    let editor = serverDialogWindow
-    if let w = editor { w.close() }
-    serverDialogWindow = nil
+    serverDialogWindow?.orderOut(nil)
     // The card may have lost key status while the editor was open; bring it back.
-    if let card = NSApp.windows.first(where: { $0 != editor }) {
+    if let card = NSApp.windows.first(where: { $0 !== serverDialogWindow }) {
         card.orderFrontRegardless()
     }
     NSApp.activate(ignoringOtherApps: true)
@@ -387,21 +433,22 @@ func closeServerDialog() {
 
 // Open the server editor in its own normal window. The card window uses a hidden
 // title bar and does not capture keyboard, so the text fields need a real window
-// that becomes key and hands focus to the first field. Single editor at a time:
-// close any existing one first.
+// that becomes key and hands focus to the first field. The window is created once
+// and reused (see closeServerDialog) so its SwiftUI tree is never torn down.
 var serverDialogWindow: NSWindow? = nil
 
 func openServerDialog() {
     if let existing = serverDialogWindow {
-        existing.close()
-        serverDialogWindow = nil
+        existing.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        return
     }
     let window = NSWindow()
     let hosting = NSHostingController(rootView: ServerDialogView())
     window.contentViewController = hosting
     window.styleMask = [.titled, .closable]
     window.title = "Strata · Server"
-    window.setContentSize(NSSize(width: 360, height: 240))
+    window.setContentSize(NSSize(width: 360, height: 312))
     window.center()
     window.level = .normal
     window.makeKeyAndOrderFront(nil)
@@ -411,43 +458,94 @@ func openServerDialog() {
     NSApp.activate(ignoringOtherApps: true)
 }
 
+// Visible keyboard-focus state for the capsule fields: the hairline stroke
+// brightens to st-accent and thickens by half a pixel. The design system's Ring
+// token is #FFFFFF, which would be a white halo on an already-light ink text;
+// the accent reads as the same "active" signal the pills use, at higher
+// contrast than the idle st-line stroke.
+func fieldStroke(focused: Bool) -> some View {
+    Capsule()
+        .stroke(focused ? cBlue.opacity(0.75) : cBorder.opacity(0.55),
+                lineWidth: focused ? 1.5 : 1)
+}
+
 // A single labeled port field: small uppercase key above a monospaced capsule.
-func portField(_ label: String, _ text: Binding<String>, _ commit: @escaping () -> Void) -> some View {
-    return VStack(spacing: 4) {
-        Text(label.uppercased())
+// Focus lives in the dialog and arrives as a binding so Tab moves between fields;
+// the field owns its own visible ring, which needs a View struct to observe it.
+struct PortField: View {
+    let label: String
+    let text: Binding<String>
+    var placeholder: String = "8080"
+    @FocusState.Binding var focused: Bool
+    let commit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(label.uppercased())
+                .font(.system(size: 8, design: .monospaced))
+                .tracking(0.5)
+                .foregroundStyle(cMuted)
+            TextField(placeholder, text: text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(cStrong)
+                .textFieldStyle(.plain)
+                .autocorrectionDisabled(true)
+                .multilineTextAlignment(.trailing)
+                .submitLabel(.done)
+                .onSubmit { commit() }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .background(Color(cSurface).opacity(0.85))
+                .overlay(fieldStroke(focused: focused))
+                .animation(motion, value: focused)
+                .focused($focused)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// The bearer key field, mirroring the URL field's capsule treatment. Plain text,
+// not a SecureField: on a LAN the key is not a secret worth hiding, and being able
+// to read it back is what makes a 401 debuggable.
+func apiKeyRowView(focusKey: FocusState<Bool>.Binding) -> some View {
+    return VStack(spacing: 6) {
+        Text("API KEY".uppercased())
             .font(.system(size: 8, design: .monospaced))
             .tracking(0.5)
             .foregroundStyle(cMuted)
-        TextField("8080", text: text)
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(cStrong)
-            .textFieldStyle(.plain)
-            .autocorrectionDisabled(true)
-            .multilineTextAlignment(.trailing)
-            .submitLabel(.done)
-            .onSubmit { commit() }
-            .padding(.vertical, 6)
-            .padding(.horizontal, 8)
-            .background(Color(cSurface).opacity(0.85))
-            .overlay(
-                Capsule()
-                    .stroke(cBorder.opacity(0.55), lineWidth: 1)
-            )
+        TextField("strata", text: Binding(
+            get: { strata.apiKeyText },
+            set: { strata.apiKeyText = $0 }
+        ))
+        .font(.system(size: 11, design: .monospaced))
+        .foregroundStyle(cStrong)
+        .textFieldStyle(.plain)
+        .autocorrectionDisabled(true)
+        .submitLabel(.done)
+        .onSubmit { commitApiKey() }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(Color(cSurface).opacity(0.85))
+        .overlay(fieldStroke(focused: focusKey.wrappedValue))
+        .animation(motion, value: focusKey.wrappedValue)
+        .focused(focusKey)
     }
-    .frame(maxWidth: .infinity)
 }
 
 // Two port fields (metrics / control) alongside the base-URL field.
-func portRowView() -> some View {
+func portRowView(focusMetrics: FocusState<Bool>.Binding,
+                 focusControl: FocusState<Bool>.Binding) -> some View {
     return HStack(spacing: 8) {
-        portField("metrics", Binding(
-            get: { strata.metricsPortText },
-            set: { strata.metricsPortText = $0 }
-        ), commitPorts)
-        portField("control", Binding(
-            get: { strata.controlPortText },
-            set: { strata.controlPortText = $0 }
-        ), commitPorts)
+        PortField(label: "metrics",
+                  text: Binding(get: { strata.metricsPortText },
+                                set: { strata.metricsPortText = $0 }),
+                  focused: focusMetrics,
+                  commit: commitPorts)
+        PortField(label: "control",
+                  text: Binding(get: { strata.controlPortText },
+                                set: { strata.controlPortText = $0 }),
+                  focused: focusControl,
+                  commit: commitPorts)
     }
 }
 
@@ -584,11 +682,21 @@ func scaleArr(_ a: [Double?]?, by f: Double) -> [Double?] {
     }
 }
 
+// Entry point for the server editor. openServerDialog() was previously defined
+// but never called, so the URL/port fields — and their focus behaviour — were
+// unreachable from the widget. Same ghost-pill treatment as the other controls.
+func changeServerButton() -> some View {
+    return HStack(spacing: 10) {
+        ControlButton(label: "Change server", color: cMuted, action: { openServerDialog() })
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.top, 8)
+}
+
 // MARK: - Down / starting branch (JSX: no parse → red pill or amber spinner)
 
 func downBody() -> some View {
     return VStack(spacing: 0) {
-        tabPillsRow()
         headerRow("● server down", cRed)
         VStack(spacing: 10) {
             captionView("\(hostLabel()):\(strata.metricsPort) unreachable")
@@ -597,6 +705,7 @@ func downBody() -> some View {
             // While the server is unreachable, the Server tab still shows the URL.
             if strata.tab == "server" {
                 serverURLButton()
+                changeServerButton()
             }
         }
         .frame(maxWidth: .infinity)
@@ -608,7 +717,6 @@ func downBody() -> some View {
 
 func serverBody(_ m: MetricsPayload) -> some View {
     return VStack(spacing: 0) {
-        tabPillsRow()
         headerRow("● running", cGreen)
         captionView("\(m.engine?.model ?? "") · \(hostLabel()) · control :\(strata.controlPort)")
             .padding(.top, 8)
@@ -621,6 +729,7 @@ func serverBody(_ m: MetricsPayload) -> some View {
         modelsListView()
         sectionHead("Server URL")
         serverURLButton()
+        changeServerButton()
         sectionHead("Ports")
         portsRowView()
     }
@@ -700,7 +809,6 @@ func metricsBody(_ m: MetricsPayload) -> some View {
     let reqHead = "Last request · \(r == nil ? "\u{2013}" : "\(ago)s ago · \(r?.finish ?? "")")"
 
     return VStack(spacing: 0) {
-        tabPillsRow()
         headerRow("● \(stateLabel)\(q != 0 ? " +\(fmtGrouped(q))" : "")", sc)
             .padding(.bottom, 2)
         modelView(eng?.model ?? "")
@@ -836,15 +944,24 @@ struct StrataCard: View {
                 ], startPoint: UnitPoint(x: 0.37, y: 0.06), endPoint: UnitPoint(x: 0.63, y: 0.94)))
                 .stroke(cBorder.opacity(0.55), lineWidth: 1)
             VStack(spacing: 0) {
-                if let m = strata.payload {
-                    if strata.tab == "server" {
-                        serverBody(m)
+                tabPillsRow()
+                // One key covers both reasons the content changes — a tab click and
+                // the payload arriving or disappearing — so the swap always animates.
+                Group {
+                    if let m = strata.payload {
+                        if strata.tab == "server" {
+                            serverBody(m)
+                                .transition(.opacity)
+                        } else {
+                            metricsBody(m)
+                                .transition(.opacity)
+                        }
                     } else {
-                        metricsBody(m)
+                        downBody()
+                            .transition(.opacity)
                     }
-                } else {
-                    downBody()
                 }
+                .animation(motion, value: strataBodyKey)
             }
             .padding(.top, 16)
             .padding(.bottom, 16)

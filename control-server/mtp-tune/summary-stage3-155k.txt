@@ -1,0 +1,5 @@
+minp0.05   n= 18 median=  45.8 tok/s accept=0.50 draft_n=387.6  paired -1.96% vs base (se 1.86, n=18, tie)
+minp0.15   n= 18 median=  45.5 tok/s accept=0.49 draft_n=378.6  paired -4.56% vs base (se 1.39, n=18, loses)
+minp0.25   n= 18 median=  47.5 tok/s accept=0.55 draft_n=328.1
+minp0.35   n= 18 median=  47.7 tok/s accept=0.63 draft_n=271.6  paired +2.48% vs base (se 1.27, n=18, tie)
+minp0.5    n= 18 median=  49.2 tok/s accept=0.70 draft_n=226.0  paired +0.72% vs base (se 1.46, n=18, tie)

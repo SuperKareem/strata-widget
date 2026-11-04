@@ -39,6 +39,19 @@ let cBorder = hex("#2a3036") // st-line: hairlines, dividers, pill outlines
 // JSX spinner string "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" — an array so spinFrame % 10 indexes it.
 let spinnerGlyphs = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
+// MARK: - Motion (design system: "Always use transitions (150-300ms)" and
+// "prefers-reduced-motion respected")
+
+// AppKit's equivalent of CSS `prefers-reduced-motion` — the system "Reduce motion"
+// toggle. Read live rather than cached at launch so a mid-session toggle applies
+// to the next state change.
+var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+// The single transition every state change uses. nil under reduced motion, which
+// makes `.animation(motion, value:)` and `withAnimation(motion)` no-ops — so the
+// widget snaps instead of animating rather than ignoring the setting.
+var motion: Animation? { reduceMotion ? nil : .easeOut(duration: 0.2) }
+
 // JSX `col(p) = p>90 ? red : p>75 ? amber : green`.
 func utilColor(_ pct: Double) -> Color {
     if pct > 90 { return cRed }
@@ -156,6 +169,9 @@ func barView(pct: Double, color: Color, width: Double = 92) -> some View {
             ], startPoint: .leading, endPoint: .trailing)) // JSX `90deg` left→right
             .frame(width: w, height: 5)
             .shadow(color: color.opacity(0.25), radius: 3) // JSX was radius 4 / 0.33
+            // Each poll re-reads the percentage; the fill glides to the new width
+            // instead of snapping (design system: no instant state changes).
+            .animation(motion, value: w)
     }
 }
 
@@ -173,6 +189,12 @@ func pillView(text: String, active: Bool) -> some View {
         .background(Capsule()
             .fill(active ? cBlue.opacity(0.16) : cSurface.opacity(0.85))
             .stroke(active ? cBlue.opacity(0.45) : cBorder.opacity(0.55), lineWidth: 1))
+        // The pill row lives in StrataCard above the animated body, so this animates
+        // the active/inactive swap on its own while the content below cross-fades.
+        .animation(motion, value: active)
+        // Active pills brighten with the accent; inactive ones with ink, so hover
+        // never reads as a focus ring.
+        .hoverLift(active ? cBlue : cWhite)
 }
 
 // MARK: - Status pill (JSX fill ≈0.11, border ≈0.22 of the status color)
@@ -187,6 +209,9 @@ func statusPillView(text: String, color: Color) -> some View {
         .background(Capsule()
             .fill(color.opacity(0.12))
             .stroke(color.opacity(0.30), lineWidth: 1))
+        // Not clickable, so no hover — but the status color interpolates when the
+        // server state changes rather than cutting between greens/ambers/reds.
+        .animation(motion, value: text)
 }
 
 // MARK: - Start/Stop buttons (JSX pill buttons)
@@ -203,6 +228,34 @@ struct PointerCursor: ViewModifier {
 
 extension View {
     func pointerCursor() -> some View { modifier(PointerCursor()) }
+
+    func hoverLift(_ color: Color = cWhite, fill: Double = 0.05, stroke: Double = 0.75) -> some View {
+        modifier(HoverLift(color: color, fill: fill, stroke: stroke))
+    }
+}
+
+// MARK: - Hover state (design system: "Hover states with smooth transitions",
+// "Instant state changes" forbidden)
+
+// PointerCursor alone changes the cursor but not the control, which is not a
+// visible hover state. This draws a tinted fill plus a brighter capsule stroke in
+// the control's existing bounds, so nothing shifts layout (the anti-pattern
+// against scale transforms) and the in/out transition runs on `motion`.
+struct HoverLift: ViewModifier {
+    var color: Color = cWhite
+    var fill: Double = 0.05
+    var stroke: Double = 0.75
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                Capsule()
+                    .fill(color.opacity(hovering ? fill : 0))
+                    .stroke(color.opacity(hovering ? stroke : 0), lineWidth: 1)
+            )
+            .animation(motion, value: hovering)
+    }
 }
 
 struct ControlButton: View {
@@ -218,9 +271,15 @@ struct ControlButton: View {
     var body: some View {
         Group {
             if loading {
-                TimelineView(.periodic(from: .now, by: 0.1)) { ctx in
-                    let f = Int(ctx.date.timeIntervalSinceReferenceDate * 10) % spinnerGlyphs.count
-                    Text("\(spinnerGlyphs[f]) launching…")
+                if reduceMotion {
+                    // Reduced motion: keep the pending affordance, drop the 10 Hz
+                    // glyph rotation.
+                    Text("\(spinnerGlyphs[0]) launching…")
+                } else {
+                    TimelineView(.periodic(from: .now, by: 0.1)) { ctx in
+                        let f = Int(ctx.date.timeIntervalSinceReferenceDate * 10) % spinnerGlyphs.count
+                        Text("\(spinnerGlyphs[f]) launching…")
+                    }
                 }
             } else {
                 Text(label)
@@ -236,6 +295,8 @@ struct ControlButton: View {
         .background(Capsule()
             .fill(color.opacity(0.10))
             .stroke(color.opacity(0.45), lineWidth: 1))
+        .hoverLift(color, fill: 0.08, stroke: 0.8)
+        .animation(motion, value: loading)
         .contentShape(Rectangle())
         .allowsHitTesting(!loading)
         .onTapGesture { if !loading { action() } }
