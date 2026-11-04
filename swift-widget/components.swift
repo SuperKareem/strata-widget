@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Palette — Strata UI "Gainsty" design system, dark theme tokens.
 // Mirrors the web app at :8080 (web/tokens.css, [data-theme="dark"]). The widget
@@ -188,27 +189,57 @@ func statusPillView(text: String, color: Color) -> some View {
             .stroke(color.opacity(0.30), lineWidth: 1))
 }
 
-// MARK: - Start/Stop buttons (JSX pill buttons; native tap replaces cursor:pointer)
+// MARK: - Start/Stop buttons (JSX pill buttons)
+
+// Pointer-hand cursor while the hover is inside a clickable. AppKit drives the
+// cursor, so SwiftUI's .onHover toggles NSCursor push/pop around the hover.
+struct PointerCursor: ViewModifier {
+    func body(content: Content) -> some View {
+        content.onHover { inside in
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+    }
+}
+
+extension View {
+    func pointerCursor() -> some View { modifier(PointerCursor()) }
+}
 
 struct ControlButton: View {
     let label: String
     let color: Color
+    var loading: Bool = false
     let action: () -> Void
 
     // Same hug-the-text .background() form as the pills: the padded Text view
     // defines both the capsule size and (via contentShape) the tap hit area.
+    // While loading the button dims, ignores taps, and runs an animated spinner
+    // so a double-press never fires the control GET twice.
     var body: some View {
-        Text(label)
-            .font(.custom("Outfit", size: 11)).fontWeight(.semibold)
-            .tracking(0.5)
-            .foregroundStyle(color)
-            .padding(.vertical, 6)
-            .padding(.horizontal, 18)
-            .background(Capsule()
-                .fill(color.opacity(0.10))
-                .stroke(color.opacity(0.45), lineWidth: 1))
-            .contentShape(Rectangle())
-            .onTapGesture(perform: action)
+        Group {
+            if loading {
+                TimelineView(.periodic(from: .now, by: 0.1)) { ctx in
+                    let f = Int(ctx.date.timeIntervalSinceReferenceDate * 10) % spinnerGlyphs.count
+                    Text("\(spinnerGlyphs[f]) launching…")
+                }
+            } else {
+                Text(label)
+            }
+        }
+        .font(.custom("Outfit", size: 11)).fontWeight(.semibold)
+        .tracking(0.5)
+        .foregroundStyle(color)
+        .opacity(loading ? 0.7 : 1)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 18)
+        .frame(minWidth: 90)
+        .background(Capsule()
+            .fill(color.opacity(0.10))
+            .stroke(color.opacity(0.45), lineWidth: 1))
+        .contentShape(Rectangle())
+        .allowsHitTesting(!loading)
+        .onTapGesture { if !loading { action() } }
+        .pointerCursor()
     }
 }
 

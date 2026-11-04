@@ -11,7 +11,25 @@ import AppKit
 
 // Own suite, so the value lands in ~/Library/Preferences/com.strata.widget.plist
 // rather than the global domain (this binary has no bundle identifier).
-let strataDefaults = UserDefaults(suiteName: "com.strata.widget")!
+// `--instance=<id>` names this launch: parallel instances get their own suite
+// and their own window scene id, so two widgets running at once never
+// read/write the same persisted window state (the shared-key race crashed the
+// second launch ~15s after start). "default" keeps the historical suite name,
+// so existing saved URLs/ports survive.
+func parseInstance() -> String {
+    for arg in CommandLine.arguments where arg.hasPrefix("--instance=") {
+        let id = String(arg.dropFirst("--instance=".count))
+        if !id.isEmpty { return id }
+    }
+    return "default"
+}
+
+let strataInstance = parseInstance()
+let strataSuiteName = strataInstance == "default" ? "com.strata.widget" : "com.strata.widget.\(strataInstance)"
+// Per-instance scene id → per-instance "NSWindow Frame …" autosave key; the
+// "default" instance keeps the historical id and window placement.
+let strataSceneID = strataInstance == "default" ? "strata.card.v5" : "strata.card.v5.\(strataInstance)"
+let strataDefaults = UserDefaults(suiteName: strataSuiteName)!
 let baseURLKey = "strata.baseURL"
 let defaultBaseURL = "http://127.0.0.1"
 let defaultMetricsPort = 8080
@@ -54,6 +72,14 @@ func normalizeBase(_ raw: String) -> String? {
     return c.url?.absoluteString
 }
 
+// Bare hosts from CLI flags / stored values: "--server-url=192.168.1.13" must
+// become a real URL, otherwise URLComponents yields "//:8080/metrics" and curl
+// refuses it, so the card reads "server down" against a live server.
+func configuredBaseURL() -> String {
+    let raw = parseServerArgs().baseURL ?? strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
+    return normalizeBase(raw) ?? defaultBaseURL
+}
+
 func endpoint(_ path: String, port: Int) -> String? {
     guard var c = URLComponents(string: strata.baseURL) else { return nil }
     c.path = path
@@ -63,9 +89,27 @@ func endpoint(_ path: String, port: Int) -> String? {
 
 func metricsURL() -> String? { endpoint("/metrics", port: strata.metricsPort) }
 func controlURL(_ cmd: String) -> String? { endpoint("/\(cmd)", port: strata.controlPort) }
-func startCoderURL() -> String? { controlURL("start-coder") }
-func startGyroMURL() -> String? { controlURL("start-gyro") }
 func stopURL() -> String? { controlURL("stop") }
+func modelsURL() -> String? { endpoint("/models", port: strata.controlPort) }
+
+// GET /models on the control port: the server answers with the models it has
+// loaded and, for each one, the endpoint that launches it.
+struct ModelsPayload: Codable, Equatable {
+    struct Entry: Codable, Equatable {
+        let id: String
+        let state: String?
+        let endpoint: String
+    }
+    let ok: Bool?
+    let models: [Entry]?
+}
+
+// Launch URL for one entry: the server supplies the path, so the widget never
+// guesses it. Paths arrive with a leading slash already.
+func launchURL(_ entry: ModelsPayload.Entry) -> String? {
+    let path = entry.endpoint.hasPrefix("/") ? entry.endpoint : "/" + entry.endpoint
+    return endpoint(path, port: strata.controlPort)
+}
 
 // Host-only view of the base URL for captions ("127.0.0.1:8080 unreachable").
 func hostLabel() -> String {
@@ -112,15 +156,14 @@ func runControl(_ url: String?) { Task { _ = await fetchBody(url) } }
 
 @Observable final class StrataState {
     var payload: MetricsPayload? = nil
+    var models: ModelsPayload? = nil
     var tab = "metrics"
-    var startTsMs: Int? = nil
-    var spinFrame = 0
     // Persisted server base URL; urlText is the field's live draft, so typing
     // mid-edit never repoints the poller.
     // CLI flags (parseServerArgs) override UserDefaults, which overrides the
     // built-in defaults. CLI wins so each alias can point at its own server.
-    var baseURL: String = parseServerArgs().baseURL ?? strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
-    var urlText: String = parseServerArgs().baseURL ?? strataDefaults.string(forKey: baseURLKey) ?? defaultBaseURL
+    var baseURL: String = configuredBaseURL()
+    var urlText: String = configuredBaseURL()
     var urlError: String? = nil
     // Ports are editable now (were hardcoded). Draft text lets the user type
     // without repointing the poller until they commit.
@@ -137,6 +180,15 @@ func runControl(_ url: String?) { Task { _ = await fetchBody(url) } }
     var metricsPortText: String = parseServerArgs().metricsPort.map(String.init) ?? String(defaultMetricsPort)
     var controlPortText: String = parseServerArgs().controlPort.map(String.init) ?? String(defaultControlPort)
     var portError: String? = nil
+    // Model whose Launch was pressed and is still loading. Loading a model
+    // restarts the engine, so /metrics goes down then comes back up; the spinner
+    // clears the moment metrics returns (launchSawDown flips while it is nil), so
+    // it never hangs on a name that does not exactly match the launched id. The
+    // name-match path covers a hot-swap with no downtime, and launchStartMs caps
+    // a silent failure so the button becomes pressable again.
+    var launchingId: String? = nil
+    var launchStartMs = 0
+    var launchSawDown = false
 }
 let strata = StrataState()
 
@@ -153,7 +205,7 @@ func commitURL() {
         strata.urlText = base
         strataDefaults.set(base, forKey: baseURLKey)
         strata.payload = nil
-        strata.startTsMs = nil
+        strata.launchingId = nil
     }
 }
 
@@ -169,21 +221,41 @@ func commitPorts() {
         if p != strata.controlPort { strata.controlPort = p; changed = true }
         strataDefaults.set(p, forKey: "strata.controlPort")
     } else { strata.portError = "bad control port" }
-    if changed { strata.payload = nil; strata.startTsMs = nil }
+    if changed { strata.payload = nil; strata.launchingId = nil }
 }
 
 // The poller replaces refreshFrequency=1000 + curl -m 3: one long-running Task
 // loop, decode, assign, sleep 1s. Spawned once when the app struct initializes.
 func startPolling() {
     Task {
+        var tick = 0
         while !Task.isCancelled {
             var parsed: MetricsPayload? = nil
             if let url = metricsURL(), let body = await fetchBody(url) {
                 parsed = try? JSONDecoder().decode(MetricsPayload.self, from: Data(body.utf8))
             }
             strata.payload = parsed
-            if parsed != nil { strata.startTsMs = nil } // a successful parse clears "starting"
-            if strata.startTsMs != nil { strata.spinFrame += 1 } // spinner advances ~1 glyph/s
+            // /models changes only when the server loads a model, so it is
+            // refetched every 5s instead of every poll.
+            if tick % 5 == 0 {
+                var fetched: ModelsPayload? = nil
+                if let url = modelsURL(), let body = await fetchBody(url) {
+                    fetched = try? JSONDecoder().decode(ModelsPayload.self, from: Data(body.utf8))
+                }
+                if fetched != nil { strata.models = fetched }
+            }
+            // Loading a model bounces the engine: while metrics is down we mark
+            // launchSawDown, and when it answers again the launch is done. A
+            // name-match clears a no-downtime hot-swap, and 180s caps a launch
+            // that never lands so the button is pressable again.
+            if let id = strata.launchingId {
+                if parsed == nil { strata.launchSawDown = true }
+                else if strata.launchSawDown || isRunningModel(id) { strata.launchingId = nil }
+                if strata.launchingId != nil && nowMs() - strata.launchStartMs > 180_000 {
+                    strata.launchingId = nil
+                }
+            }
+            tick += 1
             try? await Task.sleep(for: .seconds(1))
         }
     }
@@ -195,8 +267,10 @@ func tabPillsRow() -> some View {
     HStack(spacing: 6) {
         pillView(text: "Metrics", active: strata.tab == "metrics")
             .onTapGesture { strata.tab = "metrics" }
+            .pointerCursor()
         pillView(text: "Server", active: strata.tab == "server")
             .onTapGesture { strata.tab = "server" }
+            .pointerCursor()
     }
     .padding(.top, 10)
     .padding(.bottom, 8)
@@ -204,7 +278,8 @@ func tabPillsRow() -> some View {
 
 func headerRow(_ pill: String, _ pillColor: Color) -> some View {
     HStack {
-        Text("Strata")
+        // Named instances show their id so parallel cards are distinguishable.
+        Text(strataInstance == "default" ? "Strata" : "Strata · \(strataInstance)")
             .font(.custom("Outfit", size: 13)).fontWeight(.bold)
             .tracking(0.4)
             .foregroundStyle(cText)
@@ -376,6 +451,93 @@ func portRowView() -> some View {
     }
 }
 
+// Read-only ports for the Server tab: shows the live (committed) metrics and
+// control ports, matching the capsule treatment of the other server rows.
+func portsRowView() -> some View {
+    return HStack(spacing: 8) {
+        portCapsule("metrics", "\(strata.metricsPort)")
+        portCapsule("control", "\(strata.controlPort)")
+    }
+}
+
+// One model per row, straight from GET /models: the id plus a Launch button that
+// calls the endpoint the server named for that model. The row for the model the
+// engine is already running has no button, since launching it would restart it.
+func modelsListView() -> some View {
+    let entries = strata.models?.models ?? []
+    if entries.isEmpty {
+        return AnyView(captionView(strata.models == nil ? "models not reported yet" : "no models reported")
+            .padding(.vertical, 6))
+    }
+    return AnyView(
+        VStack(spacing: 6) {
+            ForEach(Array(entries.enumerated()), id: \.offset) { _, e in
+                modelRowView(e)
+            }
+        }
+    )
+}
+
+func modelRowView(_ e: ModelsPayload.Entry) -> some View {
+    let running = isRunningModel(e.id)
+    return HStack(spacing: 8) {
+        Text(e.id)
+            .font(.custom("Outfit", size: 11)).fontWeight(.semibold)
+            .tracking(0.4)
+            .foregroundStyle(cStrong)
+            .lineLimit(1)
+        Spacer(minLength: 8)
+        if !running {
+            ControlButton(label: "Launch", color: cBlue, loading: strata.launchingId == e.id, action: {
+                strata.launchingId = e.id // arm this row's spinner…
+                strata.launchStartMs = nowMs()
+                strata.launchSawDown = false
+                runControl(launchURL(e)) // …and fire the GET, fire-and-forget
+            })
+        }
+    }
+    .padding(.vertical, 5)
+    .padding(.horizontal, 10)
+    .background(Capsule().fill(Color(cSurface).opacity(0.5)))
+    .overlay(Capsule().stroke(cBorder.opacity(0.55), lineWidth: 1))
+}
+
+// The model id the metrics payload reports as loaded, nil while the server is down.
+func runningModel() -> String? {
+    let m = strata.payload?.engine?.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return (m?.isEmpty == false) ? m : nil
+}
+
+// /models names entries after the weight file ("gyro-Gyro-M") while metrics reports
+// the engine's short name ("gyro-m"), so equality never matches. Split both into
+// alphanumeric tokens and treat the entry as running when it covers every token of
+// the loaded name.
+func isRunningModel(_ id: String) -> Bool {
+    guard let running = runningModel() else { return false }
+    func tokens(_ s: String) -> Set<String> {
+        Set(s.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))
+    }
+    let want = tokens(running)
+    return !want.isEmpty && want.isSubset(of: tokens(id))
+}
+
+func portCapsule(_ label: String, _ value: String) -> some View {
+    return HStack(spacing: 6) {
+        Text(label.uppercased())
+            .font(.system(size: 8, design: .monospaced))
+            .tracking(0.5)
+            .foregroundStyle(cMuted)
+        Text(value)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(cStrong)
+    }
+    .padding(.vertical, 6)
+    .padding(.horizontal, 10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Capsule().fill(Color.clear))
+    .overlay(Capsule().stroke(cBorder.opacity(0.55), lineWidth: 1))
+}
+
 // The server URL shown as a capsule button with a transparent background. It
 // renders the live (committed) URL; clicking does nothing — the URL is edited
 // through the "Change Server" flow, not from here. Kept as a Button for layout
@@ -425,29 +587,13 @@ func scaleArr(_ a: [Double?]?, by f: Double) -> [Double?] {
 // MARK: - Down / starting branch (JSX: no parse → red pill or amber spinner)
 
 func downBody() -> some View {
-    let now = nowMs()
-    let startTs = strata.startTsMs ?? 0
-    let starting = strata.startTsMs != nil && now - startTs < 180_000
-    let el = Int((Double(now - startTs) / 1000).rounded())
-    let dc = starting ? cAmber : cRed
-    let pillText = starting
-        ? "\(spinnerGlyphs[strata.spinFrame % 10]) starting \(el)s"
-        : "● server down"
     return VStack(spacing: 0) {
         tabPillsRow()
-        headerRow(pillText, dc)
+        headerRow("● server down", cRed)
         VStack(spacing: 10) {
-            captionView(starting ? "waiting for server to answer…" : "\(hostLabel()):\(strata.metricsPort) unreachable")
-            HStack(spacing: 10) {
-                ControlButton(label: "Start Gyro-M", color: cBlue, action: {
-                    strata.startTsMs = nowMs() // press arms the spinner…
-                    runControl(startGyroMURL()) // …and fires the GET, fire-and-forget
-                })
-                ControlButton(label: "Start Coder", color: cBlue, action: {
-                    strata.startTsMs = nowMs() // press arms the spinner…
-                    runControl(startCoderURL()) // …and fires the GET, fire-and-forget
-                })
-            }
+            captionView("\(hostLabel()):\(strata.metricsPort) unreachable")
+            sectionHead("Models")
+            modelsListView()
             // While the server is unreachable, the Server tab still shows the URL.
             if strata.tab == "server" {
                 serverURLButton()
@@ -467,18 +613,16 @@ func serverBody(_ m: MetricsPayload) -> some View {
         captionView("\(m.engine?.model ?? "") · \(hostLabel()) · control :\(strata.controlPort)")
             .padding(.top, 8)
         HStack(spacing: 10) {
-            // Offer the *other* engine: a coder model up → start Gyro-M, and vice versa.
-            if ((m.engine?.model ?? "").lowercased().contains("coder")) {
-                ControlButton(label: "Start Gyro-M", color: cBlue, action: { runControl(startGyroMURL()) })
-            } else {
-                ControlButton(label: "Start Coder", color: cBlue, action: { runControl(startCoderURL()) })
-            }
             ControlButton(label: "Stop", color: cRed, action: { runControl(stopURL()) })
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 16)
+        sectionHead("Models")
+        modelsListView()
         sectionHead("Server URL")
         serverURLButton()
+        sectionHead("Ports")
+        portsRowView()
     }
 }
 
@@ -656,6 +800,32 @@ func metricsBody(_ m: MetricsPayload) -> some View {
 
 // MARK: - Card (JSX container: 18px radius, 165° gradient, white@.10 stroke)
 
+// Turns the scene's window into a desktop widget: it appears on every Space, sits
+// behind ordinary windows, follows no Space transition, and is out of the Window
+// menu. Controls still work because a click makes the window key.
+struct WidgetWindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let window = nsView.window, context.coordinator.window !== window else { return }
+        context.coordinator.window = window
+        // One below normal (0): above the desktop picture and its icons, below
+        // every ordinary window. NSWindow.Level exposes neither of those as a case.
+        window.level = NSWindow.Level(rawValue: -1)
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        window.hidesOnDeactivate = false
+        window.isExcludedFromWindowsMenu = true
+        window.orderBack(nil)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    class Coordinator {
+        weak var window: NSWindow?
+    }
+}
+
 struct StrataCard: View {
     var body: some View {
         ZStack(alignment: Alignment(horizontal: .center, vertical: .top)) {
@@ -679,6 +849,11 @@ struct StrataCard: View {
             .padding(.top, 16)
             .padding(.bottom, 16)
             .padding(.horizontal, 16)
+            .background(WidgetWindowConfigurator())
+            // LSUIElement means no Dock icon, so right-click is the quit affordance.
+            .contextMenu {
+                Button("Quit StrataWidget") { NSApp.terminate(nil) }
+            }
         }
     }
 }
@@ -689,7 +864,7 @@ struct StrataCard: View {
     private var _boot: Void = startPolling()
 
     var body: some Scene {
-        Window("Strata", id: "strata.card.v5") { // fresh identity: clears the clipped persisted placement
+        Window("Strata", id: strataSceneID) { // per-instance identity: parallel launches never share persisted placement
             StrataCard()
         }
         .windowStyle(.hiddenTitleBar)
