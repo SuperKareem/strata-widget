@@ -4,3 +4,6 @@ StrataWidget
 
 # macOS cruft
 .DS_Store
+
+# Compiled app bundle (rebuilt from swift-widget/ sources)
+*.app
