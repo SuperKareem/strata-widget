@@ -1,0 +1,29 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+
+# Cancel in-progress runs on the same branch if a new push arrives.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build StrataWidget.app
+        working-directory: swift-widget
+        run: ./build.sh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StrataWidget.app
+          path: swift-widget/StrataWidget.app
+          retention-days: 7
