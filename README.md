@@ -22,7 +22,7 @@ you, take it and change it.
 
 | Path | What it is |
 |---|---|
-| `swift-widget/` | The widget. `strata-app.swift` (endpoints, state, tabs, dialog), `components.swift` (design tokens, pills, sparks, buttons), `payload.swift` (metrics JSON model + formatters). |
+| `swift-widget/` | The widget. `strata-app.swift` (endpoints, state, tabs, dialog), `components.swift` (design tokens, pills, sparks, buttons, chat components), `payload.swift` (metrics JSON model + formatters), `chat.swift` (chat store, SSE streaming, chat window). |
 | `swift-widget/build.sh` | Builds `StrataWidget.app`. |
 | `swift-widget/fonts/` | [Outfit](https://fonts.google.com/specimen/Outfit) — UI typeface, SIL OFL. |
 | `control-server/` | The control server you run **on the Strata server machine**, not on the Mac. |
@@ -40,6 +40,8 @@ The widget talks to **two HTTP servers on the same host**:
         │   The Strata server machine  │  (Linux box)
         │                              │
         │  :8080  Strata  → /metrics   │  ← polled every 1s by the widget
+        │              → /health       │  ← polled every 10s (chat footer: model · ctx)
+        │              → /v1/chat/completions ← POST, SSE streaming (the chat window)
         │  :8090  control → /models    │  ← polled every 5s
         │              → /stop         │  ← fired by the Stop button
         │              → /<model-id>   │  ← fired by a Launch button
@@ -106,7 +108,7 @@ cd swift-widget
 ./build.sh      # → built StrataWidget.app
 ```
 
-`build.sh` compiles the three Swift files into a real app bundle
+`build.sh` compiles the four Swift files into a real app bundle
 (`com.strata.widget`), writes `Info.plist`, and ad-hoc codesigns it. The bundle is
 gitignored; rebuild rather than committing it.
 
@@ -129,7 +131,7 @@ open -n ./StrataWidget.app --args \
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--instance=<id>` | Names this launch. Each instance gets its own UserDefaults suite **and** its own window scene id, so parallel widgets never fight over persisted window state. | `default` |
+| `--instance=<id>` | Names this launch. Each instance gets its own UserDefaults suite **and** its own window frame autosave name, so parallel widgets never fight over persisted window state. | `default` |
 | `--server-url=<host>` | Base URL (`127.0.0.1`, `http://host`, or a full URL — scheme/host kept, path and port replaced). | `http://127.0.0.1` |
 | `--strata-port=<n>` | Port serving `/metrics`. | `8080` |
 | `--control-port=<n>` | Port serving `/models`, `/stop`, `/<model-id>`. | `8091` |
@@ -158,6 +160,16 @@ open -n ./StrataWidget.app --args \
 
 ## Using the widget
 
+- **The card is the window** — an AppKit `NSWindow` created borderless
+  (`styleMask: []`), so there is no title bar, no traffic-light buttons and no window
+  background to remove: only the rounded card is drawn and the window shadow follows
+  the card. It sits one level below ordinary windows and joins every Space.
+  Drag anywhere on the card to move it (a 6pt threshold keeps taps on the pills
+  exact), and right-click it for **Quit StrataWidget** (the app is `LSUIElement`, so
+  there is no Dock icon and no menu bar). It answers `canBecomeKey`, so the first
+  click on an inactive widget reaches the pills instead of only activating the app.
+  The Server dialog and the chat window keep their own title bars because they need a
+  text field and a close control.
 - **Metrics tab** — prompt-read progress and ETA, decode/window/mean speeds, prefill
   mean, AMD Radeon (GPU %, VRAM, temp, power), CPU/RAM/disk sparklines, and the last
   request (tok/s, expert cache hit, draft acceptance, prompt tokens + reuse). Footer
@@ -166,8 +178,17 @@ open -n ./StrataWidget.app --args \
   buttons (a model with no start script shows no button), the current server URL, and
   the two ports. See the Server-tab screenshot above.
 - **Change server** opens a separate window for the URL, API key and ports (the card
-  window has a hidden title bar and does not take keyboard focus). Save commits and
-  repoints the poller; Cancel just hides the window.
+  has no text field of its own). Save commits and repoints the poller; Cancel just
+  hides the window.
+- **Chat** opens the widget's **second window** from the Chat pill in the card: a
+  key-capable window with a text field, streaming replies from
+  `POST :<strata-port>/v1/chat/completions` (SSE, `delta.content` = answer,
+  `delta.reasoning_content` = visible thinking), **Send ⏎**, **Clear**, **New chat**,
+  a **Stop** button that ends a running stream, and an **Off/Low/Med/High** effort
+  selector (`reasoning_effort` `none|low|medium|high`). Chats persist per instance
+  (`strata.chats`, `strata.chatActive`, `strata.effort`, default high); the chat
+  footer shows the model, context, and last-run tok/s from `/health`. The card is a
+  desktop widget with no text input, so the chat is its own key-capable window.
 - If the server is unreachable the card shows `● server down` and still lists models,
   so you can reach a model that is loaded but not yet serving.
 

@@ -77,8 +77,9 @@ The widget always renders the dark theme, so the dark values are inlined.
 | `--space-2xl` | `20px` | Dialog padding |
 | `--space-3xl` | `24px`+ | Not used by the widget |
 
-Card is `350 × 640` (`windowIdealPlacement`); the live slot is pinned to `52px`
-height so the card never resizes between idle and reading states.
+Card is `350 × 640` — the borderless window's content size, which the window pins
+(`NSHostingView` gets `sizingOptions = []` so SwiftUI cannot re-fit it); the live slot
+is pinned to `52px` height so the card never resizes between idle and reading states.
 
 ### Motion
 
@@ -115,7 +116,7 @@ become no-ops. Keep every new transition inside 150–300ms.
 | **Section head** | 3×10 accent tick + Outfit 10 semibold uppercase tracking 1.2 in `st-ink-muted`, hairline rule to the right edge, 16/8 vertical rhythm |
 | **Model row** | Capsule `st-surface-2@0.5` fill + `st-line@0.55` stroke, padding 5×10; Launch button omitted for the model already running |
 | **Field / capsule** | SF Mono 11, `.textFieldStyle(.plain)`, padding 6×8–10, `st-surface-2@0.85` fill, Capsule stroke `st-line@0.55` @1px. **Focused:** `st-accent@0.75` @1.5px |
-| **Dialog** | dark, `.padding(20)`, own `NSWindow` (titled + closable) because the card window has a hidden title bar and never becomes key |
+| **Dialog** | dark, `.padding(20)`, own `NSWindow` (titled + closable); the card itself is a borderless desktop widget with no text field of its own |
 | **Divider** | `st-line@0.55`, 1px |
 
 **Hover state.** A pointer cursor alone is not a visible state change. All clickables

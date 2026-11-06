@@ -28,6 +28,8 @@ let cBright = hex("#eef1f3") // active pill text (st-ink)
 let cWhite = hex("#ffffff")
 let cSurface = hex("#1d2226") // st-surface-2: raised surface (inactive pills, tab strip)
 let cBorder = hex("#2a3036") // st-line: hairlines, dividers, pill outlines
+let cSoft = hex("#c7cdd3") // st-ink-soft: body text in web chat bubbles
+let cAccentInk = hex("#052e20") // st-accent-ink: text on a solid accent fill
 
 // MARK: - Typography — Outfit (SIL OFL 1.1), the web app's face at :8080.
 // The web app uses Outfit for UI text and a monospace face for numeric readouts
@@ -179,10 +181,16 @@ func barView(pct: Double, color: Color, width: Double = 92) -> some View {
 // pill reads as elevation rather than a ghost. Hug-the-text .background() form —
 // a bare Capsule in a ZStack is a greedy Shape and stretches in sparse tabs.)
 
-func pillView(text: String, active: Bool) -> some View {
+// `size` defaults to the card's 10pt. The chat window passes 11pt: its pills are
+// the primary controls there and 10pt Outfit is hard to read at desk distance.
+func pillView(text: String, active: Bool, size: Double = 10) -> some View {
     Text(text)
-        .font(.custom("Outfit", size: 10)).fontWeight(.bold)
+        .font(.custom("Outfit", size: size)).fontWeight(.bold)
         .tracking(0.6)
+        // Pills hug their label: a squeezed HStack must truncate rather than
+        // wrap "High" onto two lines (the chat header is tight).
+        .lineLimit(1)
+        .fixedSize()
         .foregroundStyle(active ? cBright : cDim)
         .padding(.vertical, 3)
         .padding(.horizontal, 10)
@@ -301,6 +309,144 @@ struct ControlButton: View {
         .allowsHitTesting(!loading)
         .onTapGesture { if !loading { action() } }
         .pointerCursor()
+    }
+}
+
+// MARK: - Chat (bubbles, thinking blocks, effort selector — reuse the card's
+// pillView/tokens; same hug-the-text pill treatment as everything else)
+
+// Per-corner rounding, the web app's `border-radius` shorthand: chat bubbles are
+// `--st-r-lg` with the corner nearest the input field flattened to 6px
+// (web/components.css: .st-msg--user/.st-msg--assistant .st-bubble). Capsule is
+// wrong here — on a multi-line block its radius is height/2, so the huge end
+// curves carve into the first and last text lines.
+struct RoundCorners: Shape {
+    enum Corner: Hashable { case tl, tr, br, bl }
+
+    var radius: CGFloat
+    var corners: Set<Corner> = [.tl, .tr, .br, .bl]
+
+    func path(in rect: CGRect) -> Path {
+        let r = min(radius, min(rect.width, rect.height) / 2)
+        func rr(_ c: Corner) -> CGFloat { corners.contains(c) ? r : 0 }
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX + rr(.tl), y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX - rr(.tr), y: rect.minY))
+        if corners.contains(.tr) {
+            p.addArc(center: CGPoint(x: rect.maxX - r, y: rect.minY + r), radius: r,
+                     startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        }
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - rr(.br)))
+        if corners.contains(.br) {
+            p.addArc(center: CGPoint(x: rect.maxX - r, y: rect.maxY - r), radius: r,
+                     startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        }
+        p.addLine(to: CGPoint(x: rect.minX + rr(.bl), y: rect.maxY))
+        if corners.contains(.bl) {
+            p.addArc(center: CGPoint(x: rect.minX + r, y: rect.maxY - r), radius: r,
+                     startAngle: .degrees(90), endAngle: .degrees(180), clockwise: false)
+        }
+        p.addLine(to: CGPoint(x: rect.minX, y: rect.minY + rr(.tl)))
+        if corners.contains(.tl) {
+            p.addArc(center: CGPoint(x: rect.minX + r, y: rect.minY + r), radius: r,
+                     startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        }
+        p.closeSubpath()
+        return p
+    }
+}
+
+// Chat bubble, mirroring .st-bubble: user turns sit right on the solid accent
+// with accent-ink text, assistant answers left on the raised surface token with
+// a hairline. While streaming, a caret marks growth mid-line (typing indicator
+// without animation noise). Text stays selectable.
+//
+// No `.animation(_:value:)` on the text here: during a stream the fill shape
+// animates toward its previous (shorter) bounds while the Text is already taller,
+// so the bubble background lags behind the words and trails off mid-answer.
+func bubbleView(role: String, text: String, streaming: Bool = false) -> some View {
+    let user = role == "user"
+    let shape = RoundCorners(radius: 14,
+                             corners: user ? [.tl, .tr, .bl] : [.tl, .tr, .br])
+    let align: Alignment = user ? .trailing : .leading
+    return Text(chatRichText(text + (streaming ? "▌" : "")))
+        .font(.custom("Outfit", size: 13))
+        .lineSpacing(4) // ≈ the web's line-height 1.55 at this size
+        .foregroundStyle(user ? cAccentInk : cSoft)
+        .textSelection(.enabled)
+        .multilineTextAlignment(.leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(shape.fill(user ? cBlue : Color(cSurface).opacity(0.9)))
+        .overlay(shape.stroke(user ? Color.clear : cBorder.opacity(0.7), lineWidth: 1))
+        // Bounded like .st-msg { max-width: 720px }: the bubble never spans the
+        // whole window, it sits against its own side. The cap is generous enough
+        // that a widened window reads as a wider column rather than a line
+        // length pinned at the old 380pt layout.
+        .frame(maxWidth: 460, alignment: align)
+        .frame(maxWidth: .infinity, alignment: align)
+}
+
+// Inline Markdown only (`**bold**`, `*it*`, `` `code` ``, links). Block syntax
+// is left as literal text on purpose: `.inlineOnlyPreservingWhitespace` keeps
+// the newlines a streaming answer relies on, and half-parsed markup during a
+// stream falls back to the literal string rather than eating characters.
+func chatRichText(_ s: String) -> AttributedString {
+    if let a = try? AttributedString(markdown: s,
+        options: AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+        return a
+    }
+    return AttributedString(s)
+}
+
+// Thinking block: collapsed by default (▸ header), tap expands to the mono
+// reasoning body. While thinking streams the header ends with an ellipsis.
+func thinkBlock(reasoning: String, open: Bool, streaming: Bool = false) -> some View {
+    return VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 5) {
+            Text(open ? "▾" : "▸")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(cBlue.opacity(0.8))
+            Text("thinking · \(fmtGrouped(Double(reasoning.count))) chars\(streaming ? "…" : "")")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(cDim)
+        }
+        if open {
+            Text(reasoning)
+                .font(.system(size: 12, design: .monospaced))
+                .lineSpacing(3)
+                .foregroundStyle(cDim.opacity(0.85))
+                .textSelection(.enabled)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    .padding(.vertical, 5)
+    .padding(.horizontal, 8)
+    // Rounded rect, not Capsule: expanded, this block is tall, and a capsule's
+    // radius (height/2) would carve a huge oval out of the reasoning body.
+    .background(RoundCorners(radius: 10).fill(Color(cSurface).opacity(open ? 0.55 : 0.0)))
+    .overlay(RoundCorners(radius: 10).stroke(cBorder.opacity(0.5), lineWidth: 1))
+    // Collapsed the header hugs its label (the greedy Capsule would otherwise
+    // stretch across the transcript and read as a centred bar); expanded it
+    // takes the width it is given so the reasoning body wraps.
+    .fixedSize(horizontal: !open, vertical: true)
+}
+
+// Effort selector: Off/Low/Med/High write reasoning_effort none|low|medium|high
+// into ChatModel (the pill row is the writer; active pill filled teal). The
+// `select` callback is staged into a global slot because onTapGesture handlers
+// are escaping closures and cannot capture a non-escaping function parameter.
+var chatEffortFn: (String) -> Void = { _ in }
+func effortPillsRow(current: String, select: @escaping (String) -> Void) -> some View {
+    chatEffortFn = select
+    return HStack(spacing: 6) {
+        pillView(text: "Off", active: current == "none", size: 11).onTapGesture { chatEffortFn("none") }.pointerCursor()
+        pillView(text: "Low", active: current == "low", size: 11).onTapGesture { chatEffortFn("low") }.pointerCursor()
+        pillView(text: "Med", active: current == "medium", size: 11).onTapGesture { chatEffortFn("medium") }.pointerCursor()
+        pillView(text: "High", active: current == "high", size: 11).onTapGesture { chatEffortFn("high") }.pointerCursor()
     }
 }
 

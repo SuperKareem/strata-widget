@@ -12,7 +12,7 @@ import AppKit
 // Own suite, so the value lands in ~/Library/Preferences/com.strata.widget.plist
 // rather than the global domain (this binary has no bundle identifier).
 // `--instance=<id>` names this launch: parallel instances get their own suite
-// and their own window scene id, so two widgets running at once never
+// and their own window frame autosave name, so two widgets running at once never
 // read/write the same persisted window state (the shared-key race crashed the
 // second launch ~15s after start). "default" keeps the historical suite name,
 // so existing saved URLs/ports survive.
@@ -26,9 +26,14 @@ func parseInstance() -> String {
 
 let strataInstance = parseInstance()
 let strataSuiteName = strataInstance == "default" ? "com.strata.widget" : "com.strata.widget.\(strataInstance)"
-// Per-instance scene id → per-instance "NSWindow Frame …" autosave key; the
-// "default" instance keeps the historical id and window placement.
-let strataSceneID = strataInstance == "default" ? "strata.card.v5" : "strata.card.v5.\(strataInstance)"
+// Per-instance window autosave name → per-instance "NSWindow Frame …" key. The
+// "default" instance keeps the historical id, so a position saved by the old SwiftUI
+// window scene is restored by the AppKit window too; only its position is honored —
+// the sizes saved back then were a title bar's height and a fixed card, and the
+// card's size is ours to persist now (cardSizeKey). Parallel launches never
+// read/write the same persisted window state (the shared-key race crashed the second
+// launch ~15s after start).
+let strataWindowAutosaveName = strataInstance == "default" ? "strata.card.v5" : "strata.card.v5.\(strataInstance)"
 let strataDefaults = UserDefaults(suiteName: strataSuiteName)!
 let baseURLKey = "strata.baseURL"
 let defaultBaseURL = "http://127.0.0.1"
@@ -100,6 +105,13 @@ func metricsURL() -> String? { endpoint("/metrics", port: strata.metricsPort) }
 func controlURL(_ cmd: String) -> String? { endpoint("/\(cmd)", port: strata.controlPort) }
 func stopURL() -> String? { controlURL("stop") }
 func modelsURL() -> String? { endpoint("/models", port: strata.controlPort) }
+
+// Chat is Strata itself, not the control server: POST /v1/chat/completions with
+// SSE streaming lives on the metrics port (the same :8080 as /metrics), and the
+// chat footer reads /health there. Verified live: `Bearer strata` → 200; the
+// web app at :8080 uses this exact endpoint. See chat.swift for the transport.
+func chatURL() -> String? { endpoint("/v1/chat/completions", port: strata.metricsPort) }
+func healthURL() -> String? { endpoint("/health", port: strata.metricsPort) }
 
 // GET /models on the control port: the server answers with the models it has
 // loaded and, for each one, the endpoint that launches it.
@@ -311,6 +323,11 @@ func tabPillsRow() -> some View {
         pillView(text: "Server", active: strata.tab == "server")
             .onTapGesture { strata.tab = "server" }
             .pointerCursor()
+        // The card window never takes keyboard, so the chat is the widget's
+        // second window (chat.swift): this pill just opens/toggles it.
+        pillView(text: "Chat", active: chatWindowVisible)
+            .onTapGesture { toggleChatWindow() }
+            .pointerCursor()
     }
     .padding(.top, 10)
     .padding(.bottom, 8)
@@ -425,9 +442,7 @@ struct ServerDialogView: View {
 func closeServerDialog() {
     serverDialogWindow?.orderOut(nil)
     // The card may have lost key status while the editor was open; bring it back.
-    if let card = NSApp.windows.first(where: { $0 !== serverDialogWindow }) {
-        card.orderFrontRegardless()
-    }
+    cardWindow?.orderFrontRegardless()
     NSApp.activate(ignoringOtherApps: true)
 }
 
@@ -908,30 +923,288 @@ func metricsBody(_ m: MetricsPayload) -> some View {
 
 // MARK: - Card (JSX container: 18px radius, 165° gradient, white@.10 stroke)
 
-// Turns the scene's window into a desktop widget: it appears on every Space, sits
-// behind ordinary windows, follows no Space transition, and is out of the Window
-// menu. Controls still work because a click makes the window key.
-struct WidgetWindowConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { NSView() }
+// The card IS the window: no title bar, no traffic lights, no window background
+// behind it, so the rounded card is flush with the window edge and the shadow
+// follows the card.
+//
+// This used to be a SwiftUI `Window` scene whose styleMask was rewritten to a
+// borderless one (drop `.titled`) after it mounted. That produced two crashes and
+// never fully hid the chrome:
+//   • AppKit's liquid-glass frame teardown left a stale entry in the view-hierarchy
+//     lock, so the next layout pass threw `-[NSTaggedPointerString
+//     _unlockViewHierarchyForWriting]` from
+//     `-[NSView _layoutSubtreeIfNeededAndAllowTemporaryEngine:]`.
+//   • Re-applying the borderless mask on every window update fought SwiftUI's own
+//     content sizing and collapsed the window to 0x0 (invisible widget).
+//   • A titled window keeps its glass hairline whatever `backgroundColor` says, so
+//     the border the widget is supposed to not have stayed visible.
+// A window AppKit creates borderless from the start has no frame to dismantle, none
+// of that machinery is needed, and the size is ours to set.
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        guard let window = nsView.window, context.coordinator.window !== window else { return }
-        context.coordinator.window = window
-        // One below normal (0): above the desktop picture and its icons, below
-        // every ordinary window. NSWindow.Level exposes neither of those as a case.
-        window.level = NSWindow.Level(rawValue: -1)
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
-        window.isMovableByWindowBackground = true
-        window.hidesOnDeactivate = false
-        window.isExcludedFromWindowsMenu = true
-        window.orderBack(nil)
+// Was `WindowPlacement(x: 140, y: 30, width: 350, height: 640)` on the scene. 640
+// clipped the metrics tab (the ctx/kV footer fell off the bottom edge), so the default
+// grew to the content's own height at the design width; it is the starting size, not a
+// limit — the corner grip resizes the card and the size survives relaunches.
+let cardContentSize = NSSize(width: 350, height: 780)
+
+// Inset from the top-left of the visible screen — a widget belongs to the corner you
+// glance at. AppKit's window origin is bottom-left, so the y inset is measured down.
+let cardDefaultInset = (x: 140.0, y: 30.0)
+
+// Resizable, but still a card: never so narrow that the value columns truncate, never
+// so tall that a widget covers the screen (maxHeight is also capped by the screen).
+let cardMinSize = NSSize(width: 320, height: 560)
+let cardMaxSize = NSSize(width: 720, height: 1400)
+
+// The user's own size, persisted separately from AppKit's frame autosave: the autosave
+// carries the position (and a size from whatever build last ran), while this key is
+// written only when a grip drag resizes the card. Absent = the design size above.
+let cardSizeKey = "strata.cardSize"
+
+// Bottom-right hit area for the resize grip, in window points. The card draws a glyph
+// of its own because a borderless window has no AppKit resize corners.
+let cardResizeGrip: CGFloat = 18
+
+func clampCardSize(_ size: NSSize) -> NSSize {
+    let screenCap = NSScreen.main?.visibleFrame.height ?? cardMaxSize.height
+    return NSSize(
+        width: min(max(size.width, cardMinSize.width), cardMaxSize.width),
+        height: min(max(size.height, cardMinSize.height), min(cardMaxSize.height, screenCap)))
+}
+
+/// The persisted card size, or the design size when nothing usable was stored.
+func persistedCardSize() -> NSSize {
+    guard let raw = strataDefaults.string(forKey: cardSizeKey) else { return cardContentSize }
+    let parts = raw.split(separator: "x").compactMap { Double($0) }
+    guard parts.count == 2 else { return cardContentSize }
+    return clampCardSize(NSSize(width: parts[0], height: parts[1]))
+}
+
+func saveCardSize(_ size: NSSize) {
+    strataDefaults.set("\(Int(size.width.rounded()))x\(Int(size.height.rounded()))", forKey: cardSizeKey)
+}
+
+// A borderless window answers `canBecomeKeyWindow` with NO and AppKit exposes no
+// setter for that. Without key status a click on the card never activates the app,
+// so the pills only respond on the second click of every pair. A subclass is the
+// only supported way to answer yes — and because the window is ours from the start,
+// there is no runtime class swap (and no KVO-swizzled base class) to keep correct.
+final class StrataWidgetWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    // Set by makeCardWindow; the window keeps it alive, so nothing else has to.
+    var dragMover: WindowDragMover?
+
+    // The window owns its content size. Everything that reaches setFrame is a
+    // *placement* — the frame autosave and AppKit's deferred restore both rewrite the
+    // size, and they re-apply late, late enough to undo a fix made right after
+    // ordering, while autosaves written by older builds carry a title bar's height or a
+    // stale fixed size. So the size is substituted here (clamped to the card's bounds),
+    // and the top-left is pinned because a widget is anchored to a desktop corner while
+    // AppKit pins the bottom-left: growing downward is what a taller card means.
+    var cardSize = cardContentSize
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        let size = clampCardSize(cardSize)
+        super.setFrame(
+            NSRect(x: frameRect.minX,
+                   y: frameRect.maxY - size.height,
+                   width: size.width,
+                   height: size.height),
+            display: flag)
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    class Coordinator {
-        weak var window: NSWindow?
+    /// Grow/shrink the card around its top-left corner, which is what dragging the
+    /// bottom-right grip implies. Returns whether the size actually changed.
+    @discardableResult
+    func resizeCard(to size: NSSize) -> Bool {
+        let next = clampCardSize(size)
+        guard next != cardSize else { return false }
+        cardSize = next
+        let current = frame
+        setFrame(NSRect(x: current.minX, y: current.maxY - next.height,
+                        width: next.width, height: next.height), display: true)
+        return true
     }
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .leftMouseDragged, .leftMouseUp:
+            dragMover?.handle(event)
+        default:
+            break
+        }
+        super.sendEvent(event) // the card still gets the click it was dragging through
+    }
+}
+
+// The first click on an inactive widget would normally be spent on activating the
+// app instead of reaching the pills. `acceptsFirstMouse` delivers it to SwiftUI.
+final class StrataCardHostingView: NSHostingView<StrataCard> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// Without a title bar there is no AppKit drag affordance, and
+// `isMovableByWindowBackground` never fires because the hosted card handles mouse-downs
+// itself instead of handing them to the window. Interposing `sendEvent(_:)` sees every
+// mouse event before the content view gets it, so dragging anywhere on the card moves
+// the window no matter what SwiftUI does with the click. A borderless window has no
+// resize corners either, so the same interposition handles a drag that starts on the
+// card's own bottom-right grip (ResizeGripView draws it).
+//
+// The mover adds its own movement threshold, which keeps taps on the pills and buttons
+// exactly where they are: a click that jitters a few pixels must not nudge the widget.
+final class WindowDragMover {
+    // The card window subclass, not NSWindow: the resize path needs its own setter.
+    private weak var window: StrataWidgetWindow?
+    private var frameAtStart: NSRect?
+    private var anchorAtStart: NSPoint?
+    private var translationAtThreshold: NSPoint = .zero
+    private enum Gesture { case none, move, resize }
+    private var gesture = Gesture.none
+    private var didResize = false
+    private var cursorPushed = false
+    private static let dragThreshold: CGFloat = 6
+
+    init(_ window: StrataWidgetWindow) {
+        self.window = window
+    }
+
+    /// A primary-button press on the bottom-right corner resizes; anywhere else moves.
+    /// `locationInWindow` is in the window's own non-flipped coordinates, so the corner
+    /// is the maximum x and the minimum y.
+    private func gesture(for event: NSEvent, window: NSWindow) -> Gesture {
+        let p = event.locationInWindow
+        return (p.x >= window.frame.width - cardResizeGrip && p.y <= cardResizeGrip) ? .resize : .move
+    }
+
+    /// Called for the primary-button mouse events, ahead of `super.sendEvent`.
+    /// Screen coordinates are bottom-left on both sides of the conversion, so no
+    /// flipped-view adjustment is needed here.
+    func handle(_ event: NSEvent) {
+        guard let window else { return }
+        switch event.type {
+        case .leftMouseDown:
+            gesture = self.gesture(for: event, window: window)
+            translationAtThreshold = .zero
+            frameAtStart = window.frame
+            anchorAtStart = window.convertPoint(toScreen: event.locationInWindow)
+        case .leftMouseDragged:
+            guard let start = frameAtStart, let anchor = anchorAtStart, gesture != .none else { return }
+            let now = window.convertPoint(toScreen: event.locationInWindow)
+            let t = NSPoint(x: now.x - anchor.x, y: now.y - anchor.y)
+            if gesture == .none { return }
+            if translationAtThreshold == .zero {
+                guard hypot(t.x, t.y) > Self.dragThreshold else { return }
+                translationAtThreshold = t // don't jump by the threshold on the first real move
+                setCursor(gesture)
+            }
+            // Both gestures are compensated so the pointer stays glued to whatever it
+            // grabbed, and both keep the top-left corner where it is.
+            let dx = t.x - translationAtThreshold.x
+            let dy = t.y - translationAtThreshold.y
+            if gesture == .move {
+                window.setFrameOrigin(NSPoint(x: start.minX + dx, y: start.minY + dy))
+            } else {
+                // Screen y grows upward: moving the pointer down (dy < 0) lengthens the
+                // card, since the top-left is fixed and the bottom edge follows.
+                if window.resizeCard(to: NSSize(width: start.width + dx, height: start.height - dy)) {
+                    didResize = true
+                }
+            }
+        case .leftMouseUp:
+            if didResize {
+                saveCardSize(window.cardSize) // the size the user dragged to outlives the launch
+            }
+            restoreCursor()
+            gesture = .none
+            didResize = false
+            frameAtStart = nil
+            anchorAtStart = nil
+        default:
+            break
+        }
+    }
+
+    // A drag that isn't AppKit's own gets no cursor of its own, so say what it does.
+    private func setCursor(_ gesture: Gesture) {
+        guard !cursorPushed else { return }
+        // AppKit exposes no diagonal corner cursor (the resize ones are gone in macOS
+        // 15), so the grip gets a crosshair: it says "adjust this edge" without lying.
+        (gesture == .resize ? NSCursor.crosshair : NSCursor.closedHand).push()
+        cursorPushed = true
+    }
+
+    private func restoreCursor() {
+        guard cursorPushed else { return }
+        NSCursor.pop()
+        cursorPushed = false
+    }
+}
+
+// The card window: chrome-free (card only), draggable anywhere, on every Space,
+// behind ordinary windows, unmoved by Space transitions, out of the Window menu.
+var cardWindow: NSWindow? = nil
+
+func makeCardWindow() {
+    guard cardWindow == nil else { return }
+    // The persisted/design size is in place before the autosave restores below, so the
+    // restore only ever moves the card; StrataWidgetWindow.setFrame keeps this size.
+    let cardSize = persistedCardSize()
+    let window = StrataWidgetWindow(
+        contentRect: NSRect(origin: .zero, size: cardSize),
+        styleMask: [], // borderless: styleMask [] is what has no frame at all
+        backing: .buffered,
+        defer: true)
+    window.cardSize = cardSize
+    // The window governs the size; the card fills it. Left to its defaults, an
+    // NSHostingView reports the hosted view's ideal size and AppKit re-fits the window
+    // to that, which overrode the design size below and left the card at whatever the
+    // old titled scene had saved.
+    let hosting = StrataCardHostingView(rootView: StrataCard())
+    hosting.sizingOptions = []
+    window.contentView = hosting
+    window.title = "Strata" // never drawn (no title bar) but it is the Window-list identity
+    window.backgroundColor = .clear // only the rounded card is drawn
+    window.isOpaque = false
+    window.hasShadow = true // follows the card, since the card is the whole window
+    // One below normal (0): above the desktop picture and its icons, below every
+    // ordinary window. NSWindow.Level exposes neither of those as a case.
+    window.level = NSWindow.Level(rawValue: -1)
+    window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+    // The mover below owns the drag; leaving AppKit's own background drag on
+    // would move the window a second time for the same gesture.
+    window.isMovableByWindowBackground = false
+    window.hidesOnDeactivate = false
+    window.isExcludedFromWindowsMenu = true
+    // Per-instance autosave key: parallel --instance launches must never
+    // read/write the same saved placement — the shared key race crashed the second
+    // launch ~15s after start. The restore happens inside setFrameAutosaveName, so the
+    // default placement is applied only when nothing came back.
+    let before = window.frame
+    window.setFrameAutosaveName(strataWindowAutosaveName)
+    if window.frame == before {
+        placeCardWindowDefault(window)
+    }
+    window.dragMover = WindowDragMover(window)
+    window.orderFrontRegardless() // level -1 does the stacking; no activate on launch
+    // Nothing to settle here: AppKit restores the saved frame whenever the window comes
+    // in — late enough to undo a fix made right after ordering — and
+    // StrataWidgetWindow.setFrame substitutes our own size for whatever it restores
+    // while keeping the corner the card sits in.
+    cardWindow = window
+}
+
+/// The default placement in AppKit coordinates: origin is bottom-left, so the 30pt
+/// inset is measured down from the top of the screen's visible frame, and the card is
+/// kept clear of the Dock/menu bar even on a short screen.
+func placeCardWindowDefault(_ window: NSWindow) {
+    let visible = NSScreen.main?.visibleFrame
+        ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    let x = visible.minX + cardDefaultInset.x
+    let y = max(visible.minY, visible.maxY - cardDefaultInset.y - window.frame.height)
+    window.setFrameOrigin(NSPoint(x: x, y: y))
 }
 
 struct StrataCard: View {
@@ -963,10 +1236,16 @@ struct StrataCard: View {
                 }
                 .animation(motion, value: strataBodyKey)
             }
-            .padding(.top, 16)
+            // 6 + the pill row's own 10 = the 16pt inset on the other three edges;
+            // the extra 10pt that used to sit there belonged to the traffic lights.
+            .padding(.top, 6)
             .padding(.bottom, 16)
             .padding(.horizontal, 16)
-            .background(WidgetWindowConfigurator())
+            // The resize affordance, in the corner WindowDragMover treats as a resize
+            // drag. Drawn by the card because a borderless window has no AppKit grip.
+            ResizeGripView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(5)
             // LSUIElement means no Dock icon, so right-click is the quit affordance.
             .contextMenu {
                 Button("Quit StrataWidget") { NSApp.terminate(nil) }
@@ -975,18 +1254,50 @@ struct StrataCard: View {
     }
 }
 
-// MARK: - Entry point (verified stub wiring; poller boots with the struct)
+// Two dashes parallel to the corner, the way macOS marks a resize corner. Kept quiet:
+// it is a hit target more than a decoration, so it is dim until hovered.
+struct ResizeGripView: View {
+    @State private var hovering = false
+
+    var body: some View {
+        ZStack {
+            Path { p in
+                p.move(to: CGPoint(x: 0, y: 12)); p.addLine(to: CGPoint(x: 12, y: 0))
+            }
+            .stroke(hovering ? cMuted : cBorder, lineWidth: 1)
+            Path { p in
+                p.move(to: CGPoint(x: 6, y: 12)); p.addLine(to: CGPoint(x: 12, y: 6))
+            }
+            .stroke(hovering ? cMuted : cBorder.opacity(0.7), lineWidth: 1)
+        }
+        .frame(width: 12, height: 12)
+        .onHover { hovering = $0 }
+    }
+}
+
+// MARK: - Entry point
+
+// The card is an AppKit window, not a SwiftUI scene (see makeCardWindow): a scene
+// window always has a frame view, and stripping its titlebar after the fact is what
+// crashed the widget. The delegate therefore owns the window; the App struct exists
+// for the lifecycle and for nothing else.
+final class StrataAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        bootWidget() // chat.swift: loads persisted chats, starts the metrics poller and /health polling
+        makeCardWindow()
+    }
+
+    // The card is never "closed" (it is a widget), and the chat/editor windows are
+    // hidden rather than closed, so closing one must never end the process.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
 
 @main struct StrataWidget: App {
-    private var _boot: Void = startPolling()
+    @NSApplicationDelegateAdaptor(StrataAppDelegate.self) private var delegate
 
     var body: some Scene {
-        Window("Strata", id: strataSceneID) { // per-instance identity: parallel launches never share persisted placement
-            StrataCard()
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowIdealPlacement { _, _ in
-            WindowPlacement(x: 140, y: 30, width: 350, height: 640)
-        }
+        // Required for the App lifecycle, and deliberately inert: `Settings` opens no
+        // window at launch, and an LSUIElement app has no menu item that could open it.
+        Settings { EmptyView() }
     }
 }
