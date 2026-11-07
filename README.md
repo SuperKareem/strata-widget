@@ -1,6 +1,6 @@
 # Strata Desktop Widget
 
-A small always-on-top macOS desktop widget that watches a local **Strata** inference
+A small always-on-top macOS desktop widget that watches a local [**Strata**](https://github.com/niko1221/strata) inference
 server: live decode speed, GPU/VRAM/temp/power, CPU/RAM/disk, prompt-read progress,
 and the last request's stats — plus a **Server** tab to stop the engine and launch
 another model.

@@ -119,7 +119,10 @@ struct ModelsPayload: Codable, Equatable {
     struct Entry: Codable, Equatable {
         let id: String
         let state: String?
-        let endpoint: String
+        // endpoint is null for models with no start script (not startable). Optional
+        // so the whole /models payload still decodes; a model without an endpoint
+        // simply renders without a Launch button.
+        let endpoint: String?
     }
     let ok: Bool?
     let models: [Entry]?
@@ -128,8 +131,9 @@ struct ModelsPayload: Codable, Equatable {
 // Launch URL for one entry: the server supplies the path, so the widget never
 // guesses it. Paths arrive with a leading slash already.
 func launchURL(_ entry: ModelsPayload.Entry) -> String? {
-    let path = entry.endpoint.hasPrefix("/") ? entry.endpoint : "/" + entry.endpoint
-    return endpoint(path, port: strata.controlPort)
+    guard let path = entry.endpoint else { return nil } // no start script → not startable
+    let launchPath = path.hasPrefix("/") ? path : "/" + path
+    return endpoint(launchPath, port: strata.controlPort)
 }
 
 // Host-only view of the base URL for captions ("127.0.0.1:8080 unreachable").
@@ -603,7 +607,9 @@ func modelRowView(_ e: ModelsPayload.Entry) -> some View {
             .foregroundStyle(cStrong)
             .lineLimit(1)
         Spacer(minLength: 8)
-        if !running {
+        // Launch only when the model is startable (has an endpoint) and not already
+        // running; a model with no start script is reported but has no button.
+        if !running, e.endpoint != nil {
             ControlButton(label: "Launch", color: cBlue, loading: strata.launchingId == e.id, action: {
                 strata.launchingId = e.id // arm this row's spinner…
                 strata.launchStartMs = nowMs()

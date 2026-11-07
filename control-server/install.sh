@@ -92,6 +92,33 @@ if [ -z "$IDS" ]; then
     exit 1
 fi
 
+# node_bin: a node binary that survives reboot (works from any shell, too,
+# including zsh, where the PATH may come from the session). If node is here,
+# follow a symlink to its real file; if that (or node itself) is missing while
+# fnm exists, use fnm's "default" alias, which points at one installed
+# version and does not go away.
+node_bin() {
+    NODE=$(command -v node 2>/dev/null) || NODE=
+    if [ -n "$NODE" ]; then
+        RESOLVED=$(readlink -f "$NODE" 2>/dev/null) || RESOLVED=$NODE
+        case "$RESOLVED" in
+            */fnm_multishells/*) ;;
+            *) printf '%s\n' "$RESOLVED"; return 0 ;;
+        esac
+    fi
+    FNM_NODE="$HOME/.local/share/fnm/aliases/default/bin/node"
+    if [ -x "$FNM_NODE" ]; then
+        printf '%s\n' "$FNM_NODE"
+        return 0
+    fi
+    printf '%s\n' "${RESOLVED:-node}"
+    return 1
+}
+
+if ! NODE_BIN=$(node_bin); then
+    echo "warning: no boot-safe node found (no node in PATH, no fnm default alias) - the unit will use the PATH"
+fi
+
 # --- endpoints, one per model -----------------------------------------------
 printf 'endpoints on :%s\n' "$PORT"
 REST="$IDS"
@@ -139,7 +166,7 @@ case "$BOOT" in
                 echo
                 echo "[Service]"
                 echo "WorkingDirectory=$HERE"
-                echo "ExecStart=$(command -v node) server.js"
+                echo "ExecStart=$NODE_BIN server.js"
                 echo
                 echo "[Install]"
                 echo "WantedBy=default.target"
