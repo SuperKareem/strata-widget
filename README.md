@@ -8,6 +8,8 @@ another model.
 | Metrics tab | Server tab |
 |---|---|
 | ![Strata widget — Metrics tab](docs/screenshots/metrics.png) | ![Strata widget — Server tab](docs/screenshots/server.png) |
+| **Mini card** (compact view) | **Chat** window |
+| ![Strata widget — Mini card](docs/screenshots/mini.png) | ![Strata widget — Chat](docs/screenshots/chat.png) |
 
 **This is my personal tool.** I built it for my own setup — two machines, two
 servers, several models per machine — and it is shaped around how I actually run
