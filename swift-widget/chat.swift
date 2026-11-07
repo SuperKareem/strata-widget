@@ -553,7 +553,7 @@ struct ChatWindowView: View {
         // size it is given instead of pinning a 380×500 frame. contentMinSize on
         // the window keeps these rows from being squeezed below a usable width.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(cardSurface(radius: 14, frost: false)) // flat: an ordinary window keeps its own background
+        .background(cardSurface(radius: 14, frost: true)) // the card’s exact Liquid Glass frost, now on a borderless window
         .overlayPreferenceValue(ChatPickerAnchorKey.self) { anchor in chatPickerOverlay(anchor) }
     }
 }
@@ -720,6 +720,16 @@ func fmtTokK(_ v: Double) -> String {
 // MARK: - Window lifecycle — reuse; hide with orderOut; never close/release.
 // NSApp.activate is required on every open: the app is LSUIElement, so a window
 // can otherwise appear with no keyboard focus (cursor would never blink).
+// A borderless window answers canBecomeKey/canBecomeMain with NO and AppKit exposes
+// no setter. The chat window is now borderless (no title bar) so the frost glass can
+// blur the desktop behind it — but its text field must still be able to take focus, so
+// this subclass restores key/main status, the same trick StrataWidgetWindow uses for the
+// card's pills.
+final class StrataChatWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 func openChatWindow() {
     chatWindowVisible = true
     if let existing = chatWindow {
@@ -727,15 +737,27 @@ func openChatWindow() {
         NSApp.activate(ignoringOtherApps: true)
         return
     }
-    let window = NSWindow()
+    // Borderless + transparent so the card’s `cardSurface(frost: true)` glass actually
+    // blurs the desktop behind it (a titled, opaque window’s own backing would stop the
+    // blur, exactly as the card window had to go borderless). Key/main status is restored
+    // by StrataChatWindow below — a plain borderless window can’t become key, and the
+    // chat’s text field needs key status to take focus. No `.titled`, so there is no title
+    // bar; the in-view ✕ pill is the only close control, and background drag moves it.
+    let window = StrataChatWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
+        styleMask: [.resizable], // borderless (no .titled): no title bar
+        backing: .buffered,
+        defer: true)
     let hosting = NSHostingController(rootView: ChatWindowView())
     // Resizing needs the hosting view to follow the window's frame instead of the
     // other way round: NSHostingController defaults to .preferredContentSize, which
     // pins the window to the SwiftUI view's ideal size and ignores resize drags.
     hosting.sizingOptions = []
     window.contentViewController = hosting
-    window.styleMask = [.titled, .closable, .resizable]
-    window.title = "Strata Chat"
+    window.title = "Strata Chat" // Window-list identity only; no title bar is drawn
+    window.backgroundColor = .clear // only the rounded frosted surface is drawn
+    window.isOpaque = false
+    window.hasShadow = true // the shadow follows the rounded surface, as on the card
     // Room for the 13pt transcript plus the input row at the narrowest useful
     // width, with a sane ceiling so a maximised drag stays a chat window.
     window.contentMinSize = NSSize(width: 340, height: 400)
