@@ -185,6 +185,9 @@ func runControl(_ url: String?) { Task { _ = await fetchBody(url) } }
     var payload: MetricsPayload? = nil
     var models: ModelsPayload? = nil
     var tab = "metrics"
+    // Mini mode: double-clicking the card collapses it to just the header,
+    // model and Speed section (see miniBody). Toggling it resizes the card window.
+    var mini = false
     // Persisted server base URL; urlText is the field's live draft, so typing
     // mid-edit never repoints the poller.
     // CLI flags (parseServerArgs) override UserDefaults, which overrides the
@@ -964,6 +967,70 @@ let cardSizeKey = "strata.cardSize"
 // Bottom-right hit area for the resize grip, in window points. The card draws a glyph
 // of its own because a borderless window has no AppKit resize corners.
 let cardResizeGrip: CGFloat = 18
+// Collapsed card shown on double-click: only the header (title + status pill), the
+// running model, and the Speed section. Anchored to the same top-left corner as the
+// full card, so the widget shrinks downward from the corner you glance at. Bypasses
+// clampCardSize on purpose — the full card's 320x560 minimum is far too tall here.
+let miniCardSize = NSSize(width: 300, height: 250)
+
+/// Resize the card window to mini or full around its top-left corner and update the
+/// observed state so the SwiftUI card re-renders the matching body.
+func setMiniMode(_ on: Bool) {
+    strata.mini = on
+    (cardWindow as? StrataWidgetWindow)?.setMini(on)
+}
+
+/// Double-click affordance: flip between the full card and the collapsed mini card.
+func toggleMiniMode() { setMiniMode(!strata.mini) }
+
+// Close affordance in the card's top-right corner. The card is the widget, so closing
+// it ends the process exactly like the right-click Quit menu item (LSUIElement has no
+// Dock icon to keep alive behind a hidden window).
+func closeCardButton() -> some View {
+    Button(action: { NSApp.terminate(nil) }) {
+        Image(systemName: "xmark")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(cMuted)
+            .frame(width: 16, height: 16)
+            .background(Circle().fill(cSurface.opacity(0.7)))
+            .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .pointerCursor()
+    .help("Close widget")
+}
+
+// MARK: - Mini (collapsed) card body — header + model + Speed only.
+
+// Mirrors the top of metricsBody's Speed block (index.jsx) so the numbers read exactly
+// the same; only the idle/amber status and the four speed rows are needed here.
+func miniBody(_ m: MetricsPayload) -> some View {
+    let live = m.live
+    let hw = m.hardware
+    let eng = m.engine
+    let h = m.history
+    let combined = ("\(live?.phase ?? "") \(live?.state ?? "")").lowercased()
+    let idle = live?.phase == nil || combined.contains("idle") || combined.contains("sleep")
+    let sc = idle ? cGreen : cAmber
+    let stateLabel = (live?.state ?? "").isEmpty ? "idle" : (live?.state ?? "")
+    let q = live?.queued ?? 0
+    return VStack(spacing: 0) {
+        headerRow("● \(stateLabel)\(q != 0 ? " +\(fmtGrouped(q))" : "")", sc)
+            .padding(.bottom, 2)
+        modelView(eng?.model ?? "")
+            .padding(.top, 8)
+        sectionHead("Speed")
+            .padding(.top, 12)
+        rowView(label: "Decode", value: "\(fmtFixed(live?.tok_s)) tok/s", data: h?.tok_s ?? [], lo: nil, hi: nil, color: cBlue)
+            .padding(.top, 4)
+        kvView(key: "Window (\(fmtFixed(live?.tok_s_window_s))s) · sampled", value: "\(fmtFixed(live?.tok_s)) · \(fmtFixed(hw?.tok_s)) tok/s")
+            .padding(.top, 4)
+        kvView(key: "Decode mean", value: "\(fmtFixed(live?.tok_s_mean)) / \(fmtFixed(hw?.tok_s_mean)) tok/s")
+            .padding(.top, 4)
+        kvView(key: "Prefill mean", value: "\(fmtFixed(live?.prefill_tok_s_mean, digits: 0)) tok/s")
+            .padding(.top, 4)
+    }
+}
 
 func clampCardSize(_ size: NSSize) -> NSSize {
     let screenCap = NSScreen.main?.visibleFrame.height ?? cardMaxSize.height
@@ -1004,9 +1071,20 @@ final class StrataWidgetWindow: NSWindow {
     // and the top-left is pinned because a widget is anchored to a desktop corner while
     // AppKit pins the bottom-left: growing downward is what a taller card means.
     var cardSize = cardContentSize
+    // When true the window is the collapsed mini card: setFrame substitutes
+    // miniCardSize instead of the clamped full-card size. Toggled by setMini.
+    var mini = false
+
+    func setMini(_ on: Bool) {
+        mini = on
+        let current = frame
+        let size = on ? miniCardSize : clampCardSize(cardSize)
+        setFrame(NSRect(x: current.minX, y: current.maxY - size.height,
+                        width: size.width, height: size.height), display: true)
+    }
 
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
-        let size = clampCardSize(cardSize)
+        let size = mini ? miniCardSize : clampCardSize(cardSize)
         super.setFrame(
             NSRect(x: frameRect.minX,
                    y: frameRect.maxY - size.height,
@@ -1219,39 +1297,68 @@ struct StrataCard: View {
             // design system's gradient (see cardSurface in components.swift).
             cardSurface(radius: 16)
             VStack(spacing: 0) {
-                tabPillsRow()
-                // One key covers both reasons the content changes — a tab click and
-                // the payload arriving or disappearing — so the swap always animates.
-                Group {
+                if strata.mini {
+                    // Collapsed card: header + model + Speed only. If the server is
+                    // down there is nothing to collapse to, so show the down state.
                     if let m = strata.payload {
-                        if strata.tab == "server" {
-                            serverBody(m)
-                                .transition(.opacity)
-                        } else {
-                            metricsBody(m)
-                                .transition(.opacity)
-                        }
+                        miniBody(m)
+                            .transition(.opacity)
                     } else {
                         downBody()
                             .transition(.opacity)
                     }
+                } else {
+                    tabPillsRow()
+                    // One key covers both reasons the content changes — a tab click and
+                    // the payload arriving or disappearing — so the swap always animates.
+                    Group {
+                        if let m = strata.payload {
+                            if strata.tab == "server" {
+                                serverBody(m)
+                                    .transition(.opacity)
+                            } else {
+                                metricsBody(m)
+                                    .transition(.opacity)
+                            }
+                        } else {
+                            downBody()
+                                .transition(.opacity)
+                        }
+                    }
+                    .animation(motion, value: strataBodyKey)
                 }
-                .animation(motion, value: strataBodyKey)
             }
-            // 6 + the pill row's own 10 = the 16pt inset on the other three edges;
-            // the extra 10pt that used to sit there belonged to the traffic lights.
-            .padding(.top, 6)
+            // In mini there are no pills, so give the header room to clear the close
+            // button in the corner. 6 + the pill row's own 10 = the 16pt inset.
+            .padding(.top, strata.mini ? 26 : 6)
             .padding(.bottom, 16)
             .padding(.horizontal, 16)
-            // The resize affordance, in the corner WindowDragMover treats as a resize
-            // drag. Drawn by the card because a borderless window has no AppKit grip.
-            ResizeGripView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                .padding(5)
-            // LSUIElement means no Dock icon, so right-click is the quit affordance.
-            .contextMenu {
-                Button("Quit StrataWidget") { NSApp.terminate(nil) }
+            .animation(motion, value: strata.mini)
+            // Close (X) in the top-right corner, clear of the pills and status pill.
+            HStack {
+                Spacer()
+                closeCardButton()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .padding(.top, 8)
+            .padding(.trailing, 10)
+            if !strata.mini {
+                // The resize affordance, in the corner WindowDragMover treats as a
+                // resize drag. Drawn by the card because a borderless window has no
+                // AppKit grip, and pointless in the fixed-size mini card.
+                ResizeGripView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(5)
+            }
+        }
+        .contentShape(Rectangle())
+        // Double-click anywhere on the card collapses/expands it. The pills, the X, and
+        // the grip own their own taps (higher gesture priority), so this only fires on
+        // the background; the drag mover ignores a click with no movement.
+        .onTapGesture(count: 2) { toggleMiniMode() }
+        // LSUIElement means no Dock icon, so right-click is the quit affordance.
+        .contextMenu {
+            Button("Quit StrataWidget") { NSApp.terminate(nil) }
         }
     }
 }
