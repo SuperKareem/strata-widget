@@ -554,6 +554,11 @@ struct ChatWindowView: View {
         // the window keeps these rows from being squeezed below a usable width.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(cardSurface(radius: 14, frost: true)) // the card’s exact Liquid Glass frost, now on a borderless window
+        // Visual affordance for the resize corner the ChatDragMover detects by pointer
+        // position; allowsHitTesting(false) keeps it from stealing the corner's clicks.
+        .overlay(alignment: .bottomTrailing) {
+            ResizeGripView().padding(6).allowsHitTesting(false)
+        }
         .overlayPreferenceValue(ChatPickerAnchorKey.self) { anchor in chatPickerOverlay(anchor) }
     }
 }
@@ -725,9 +730,109 @@ func fmtTokK(_ v: Double) -> String {
 // blur the desktop behind it — but its text field must still be able to take focus, so
 // this subclass restores key/main status, the same trick StrataWidgetWindow uses for the
 // card's pills.
+// Drag-and-resize constants for the borderless chat window, which has no AppKit title
+// bar or resize corners. Move is grabbed on the header band at the top (the identity +
+// effort rows); resize on the bottom-right corner, mirroring the card grip. Both keep
+// the top-left corner fixed.
+let chatResizeGrip: CGFloat = 18
+let chatHeaderDragHeight: CGFloat = 60
+
+// Drag-and-resize handling for the borderless chat window. A plain press in the header
+// band moves the window; one in the bottom-right corner resizes it; anywhere else
+// returns .none so the transcript still scrolls and the text field still takes focus.
+final class ChatDragMover {
+    private weak var window: StrataChatWindow?
+    private var frameAtStart: NSRect?
+    private var anchorAtStart: NSPoint?
+    private var translationAtThreshold: NSPoint = .zero
+    private enum Gesture { case none, move, resize }
+    private var gesture = Gesture.none
+    private var cursorPushed = false
+    private static let dragThreshold: CGFloat = 6
+
+    init(_ window: StrataChatWindow) { self.window = window }
+
+    /// `locationInWindow` is the window's own bottom-left origin, so the header band is
+    /// the maximum y and the resize corner is the maximum x / minimum y.
+    private func gesture(for event: NSEvent, window: NSWindow) -> Gesture {
+        let p = event.locationInWindow
+        if p.x >= window.frame.width - chatResizeGrip && p.y <= chatResizeGrip { return .resize }
+        if p.y >= window.frame.height - chatHeaderDragHeight { return .move }
+        return .none
+    }
+
+    func handle(_ event: NSEvent) {
+        guard let window else { return }
+        switch event.type {
+        case .leftMouseDown:
+            gesture = self.gesture(for: event, window: window)
+            translationAtThreshold = .zero
+            frameAtStart = window.frame
+            anchorAtStart = window.convertPoint(toScreen: event.locationInWindow)
+        case .leftMouseDragged:
+            guard let start = frameAtStart, let anchor = anchorAtStart else { return }
+            let now = window.convertPoint(toScreen: event.locationInWindow)
+            let t = NSPoint(x: now.x - anchor.x, y: now.y - anchor.y)
+            if gesture == .none { return }
+            if translationAtThreshold == .zero {
+                guard hypot(t.x, t.y) > Self.dragThreshold else { return }
+                translationAtThreshold = t // don't jump by the threshold on the first move
+                setCursor(gesture)
+            }
+            let dx = t.x - translationAtThreshold.x
+            let dy = t.y - translationAtThreshold.y
+            if gesture == .move {
+                window.setFrameOrigin(NSPoint(x: start.minX + dx, y: start.minY + dy))
+            } else {
+                // Borderless: the frame size is the content size, so the window's own
+                // min/max apply directly. Grow downward from the fixed top-left.
+                let lo = window.contentMinSize, hi = window.contentMaxSize
+                let w = min(hi.width, max(lo.width, start.width + dx))
+                let h = min(hi.height, max(lo.height, start.height - dy))
+                window.setFrame(NSRect(x: start.minX, y: start.maxY - h, width: w, height: h),
+                                display: true)
+            }
+        case .leftMouseUp:
+            restoreCursor()
+            gesture = .none
+        default:
+            break
+        }
+    }
+
+    private func setCursor(_ gesture: Gesture) {
+        guard !cursorPushed else { return }
+        (gesture == .resize ? NSCursor.crosshair : NSCursor.closedHand).push()
+        cursorPushed = true
+    }
+
+    private func restoreCursor() {
+        guard cursorPushed else { return }
+        NSCursor.pop()
+        cursorPushed = false
+    }
+}
+
 final class StrataChatWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    // Set by openChatWindow; the window keeps it alive, as the card does.
+    var dragMover: ChatDragMover?
+
+    // Route the primary-button mouse events through the mover ahead of SwiftUI — the
+    // exact pattern the card uses — then still hand the click to the hosting view so
+    // pills, the text field and scrolling keep working. A click with no movement never
+    // triggers a gesture, so taps on the header pills still register.
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .leftMouseDragged, .leftMouseUp:
+            dragMover?.handle(event)
+        default:
+            break
+        }
+        super.sendEvent(event)
+    }
 }
 
 func openChatWindow() {
@@ -742,7 +847,8 @@ func openChatWindow() {
     // blur, exactly as the card window had to go borderless). Key/main status is restored
     // by StrataChatWindow below — a plain borderless window can’t become key, and the
     // chat’s text field needs key status to take focus. No `.titled`, so there is no title
-    // bar; the in-view ✕ pill is the only close control, and background drag moves it.
+    // bar; the in-view ✕ pill is the only close control, and ChatDragMover below makes
+    // it draggable from the header band and resizable from the bottom-right corner.
     let window = StrataChatWindow(
         contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
         styleMask: [.resizable], // borderless (no .titled): no title bar
@@ -770,7 +876,11 @@ func openChatWindow() {
     let before = window.frame
     window.setFrameAutosaveName("StrataChat.\(strataInstance)")
     let restored = window.frame != before
-    window.isMovableByWindowBackground = true
+    // AppKit's own background drag is off: the mover below owns the gesture, and
+    // leaving it on would move the window a second time for the same drag (and grab
+    // drags inside the transcript and text field).
+    window.isMovableByWindowBackground = false
+    window.dragMover = ChatDragMover(window)
     window.level = .normal // key-capable: the card window never becomes key; this one must
     window.makeKeyAndOrderFront(nil)
     // After the first display pass (and only when autosave restored nothing): the
