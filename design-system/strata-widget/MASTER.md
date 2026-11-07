@@ -97,6 +97,7 @@ become no-ops. Keep every new transition inside 150–300ms.
 | Depth | Value | Usage |
 |-------|-------|-------|
 | Card elevation | 1px `st-line` @0.55 stroke + `st-surface → st-bg` gradient at ~165° | **No box shadow.** Depth reads as stroke + gradient, not shadow |
+| Card frost (macOS 26+) | OS Liquid Glass under the gradient: glass tint `st-bg` @0.7, gradient @0.72 | The card's background is the desktop, blurred by the OS. `frost: false` keeps the flat 0.94 surface for the chat and Server windows, which have no desktop behind them |
 | Bar glow | `color.opacity(0.25)` / radius `3` | The only glow in the widget (JSX original was 0.33 / 4; trimmed for "low white emission") |
 | Raised surface | `st-surface-2` @0.85 fill | Inactive pills/rows read as elevation rather than ghost |
 

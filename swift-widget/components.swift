@@ -31,6 +31,52 @@ let cBorder = hex("#2a3036") // st-line: hairlines, dividers, pill outlines
 let cSoft = hex("#c7cdd3") // st-ink-soft: body text in web chat bubbles
 let cAccentInk = hex("#052e20") // st-accent-ink: text on a solid accent fill
 
+// MARK: - Surfaces — the frosted card background (st-surface -> st-bg over the OS blur).
+
+// The card's background is blurry because it sits on the OS' own frosted surface:
+// `glassEffect` (macOS 26+ Liquid Glass) is what blurs whatever is behind the widget.
+// Two things that look like they should work, don't: a transparent window never shows
+// the desktop (a borderless window composites its own buffer), and a SwiftUI material
+// layer only paints a grainy tint of the desktop and leaves it sharp. The design
+// gradient then tints that frosted surface, at `cardFrosting`, so the blur reads through
+// while st-ink stays legible. `frost: false` keeps the flat surface for the chat and
+// server windows, which are ordinary windows that keep their own opaque background.
+func cardSurface(radius: Double, frost: Bool = true) -> some View {
+    // The frost sits *inside* the card's own rim: a 4pt margin keeps the OS blur off
+    // the window's rounded edge, and the whole surface is clipped to the card's shape,
+    // so the glass can neither spill past the corners nor leave a dark inset ellipse.
+    let margin: Double = frost ? 4 : 0
+    let card = RoundedRectangle(cornerRadius: radius)
+    let gradient = LinearGradient(colors: [
+        hex("#161a1d").opacity(frost ? cardFrosting : 0.94), // st-surface
+        hex("#0e1113").opacity(min(1, (frost ? cardFrosting : 0.94) + 0.02)), // st-bg (OLED-dark)
+    ], startPoint: UnitPoint(x: 0.37, y: 0.06), endPoint: UnitPoint(x: 0.63, y: 0.94))
+    return ZStack {
+        if frost, #available(macOS 26.0, *) {
+            // The glass mask must be an explicit rounded rectangle. Without `in:`,
+            // glassEffect defaults its mask to Capsule(), which morphs the frost into a
+            // cylinder/stadium (a dark inset ellipse that spills past the rim). Passing
+            // the card's own shape, inset by `margin`, makes the frost a rounded square
+            // matching the card's width and height with a 4pt margin inside the rim.
+            Color.clear
+                .glassEffect(.regular.tint(hex("#0e1113").opacity(0.7)),
+                             in: RoundedRectangle(cornerRadius: radius - margin))
+                .padding(margin)
+        }
+        card.fill(gradient)
+        card.stroke(cBorder.opacity(0.55), lineWidth: 1)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .clipShape(card)
+}
+
+// How opaque the gradient sits over the frosted glass: low enough that the desktop blur
+// behind the card reads, high enough that the muted labels keep their contrast.
+let cardFrosting: Double = {
+    if #available(macOS 26.0, *) { return 0.72 }
+    return 0.94 // older macOS has no OS blur for a borderless window: keep the flat surface
+}()
+
 // MARK: - Typography — Outfit (SIL OFL 1.1), the web app's face at :8080.
 // The web app uses Outfit for UI text and a monospace face for numeric readouts
 // (web/tokens.css: --st-font, --st-font-mono). Call sites use SwiftUI's own font

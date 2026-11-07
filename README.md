@@ -134,7 +134,7 @@ open -n ./StrataWidget.app --args \
 | `--instance=<id>` | Names this launch. Each instance gets its own UserDefaults suite **and** its own window frame autosave name, so parallel widgets never fight over persisted window state. | `default` |
 | `--server-url=<host>` | Base URL (`127.0.0.1`, `http://host`, or a full URL — scheme/host kept, path and port replaced). | `http://127.0.0.1` |
 | `--strata-port=<n>` | Port serving `/metrics`. | `8080` |
-| `--control-port=<n>` | Port serving `/models`, `/stop`, `/<model-id>`. | `8091` |
+| `--control-port=<n>` | Port serving `/models`, `/stop`, `/<model-id>`. | `8090` |
 | `--api-key=<key>` | Bearer key sent on every request. `--api-key=` (empty) sends no `Authorization` header at all, for a server that needs no auth. | `strata` |
 
 Precedence: **CLI flags → UserDefaults → built-in defaults.** Flags win so each launch
@@ -170,6 +170,13 @@ open -n ./StrataWidget.app --args \
   click on an inactive widget reaches the pills instead of only activating the app.
   The Server dialog and the chat window keep their own title bars because they need a
   text field and a close control.
+- **The card background is frosted** — the design gradient sits on the OS' own Liquid
+  Glass surface (`glassEffect`, macOS 26+), so the desktop behind the widget reads through
+  as a soft blur. A transparent window alone does not do this (a borderless window
+  composites its own buffer) and a SwiftUI material layer only paints a grainy tint while
+  leaving the desktop sharp, so the glass is the only thing that actually blurs it. On
+  older macOS the card keeps its flat near-opaque gradient; the chat and Server windows
+  always keep that flat surface (`cardSurface(radius:, frost: false)`).
 - **Metrics tab** — prompt-read progress and ETA, decode/window/mean speeds, prefill
   mean, AMD Radeon (GPU %, VRAM, temp, power), CPU/RAM/disk sparklines, and the last
   request (tok/s, expert cache hit, draft acceptance, prompt tokens + reuse). Footer

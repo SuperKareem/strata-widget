@@ -430,8 +430,9 @@ func chatStreamReply() async {
     chatFinalizeStream()
 }
 
-// MARK: - Chat window view (380pt, mirrors the card: same gradient, tokens,
-// pill treatments; reduce-motion honored through `motion` everywhere)
+// MARK: - Chat window view (380pt, mirrors the card's tokens and pill treatments;
+// its surface stays flat (`frost: false`) because an ordinary window has no desktop
+// behind it to blur; reduce-motion honored through `motion` everywhere)
 struct ChatWindowView: View {
     @FocusState private var inputFocus: Bool
 
@@ -552,14 +553,7 @@ struct ChatWindowView: View {
         // size it is given instead of pinning a 380×500 frame. contentMinSize on
         // the window keeps these rows from being squeezed below a usable width.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(.linearGradient(colors: [
-                    hex("#161a1d").opacity(0.94), // st-surface
-                    hex("#0e1113").opacity(0.96), // st-bg (OLED-dark)
-                ], startPoint: UnitPoint(x: 0.37, y: 0.06), endPoint: UnitPoint(x: 0.63, y: 0.94)))
-                .stroke(cBorder.opacity(0.55), lineWidth: 1)
-        )
+        .background(cardSurface(radius: 14, frost: false)) // flat: an ordinary window keeps its own background
         .overlayPreferenceValue(ChatPickerAnchorKey.self) { anchor in chatPickerOverlay(anchor) }
     }
 }

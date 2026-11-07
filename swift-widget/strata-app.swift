@@ -38,7 +38,7 @@ let strataDefaults = UserDefaults(suiteName: strataSuiteName)!
 let baseURLKey = "strata.baseURL"
 let defaultBaseURL = "http://127.0.0.1"
 let defaultMetricsPort = 8080
-let defaultControlPort = 8091
+let defaultControlPort = 8090
 
 // The server's --api-key, sent as Authorization: Bearer on every request. Not a
 // security boundary — see README. Empty means "no auth": the header is omitted.
@@ -48,7 +48,7 @@ let defaultApiKey = "strata"
 
 // Parse the launch flags so the widget can be pointed at a host/ports from the
 // command line, e.g.
-//   open StrataWidget --server-url=127.0.0.1 --strata-port=8080 --control-port=8091
+//   open StrataWidget --server-url=127.0.0.1 --strata-port=8080 --control-port=8090
 // CLI values override UserDefaults (which overrides the built-in defaults).
 // Only the keys that are actually present are returned (nil = not passed).
 func parseServerArgs() -> (baseURL: String?, metricsPort: Int?, controlPort: Int?, apiKey: String?) {
@@ -921,7 +921,7 @@ func metricsBody(_ m: MetricsPayload) -> some View {
     }
 }
 
-// MARK: - Card (JSX container: 18px radius, 165° gradient, white@.10 stroke)
+// MARK: - Card (JSX container: 16px radius, 165° frosted gradient, white@.10 stroke)
 
 // The card IS the window: no title bar, no traffic lights, no window background
 // behind it, so the rounded card is flush with the window edge and the shadow
@@ -1164,6 +1164,11 @@ func makeCardWindow() {
     // old titled scene had saved.
     let hosting = StrataCardHostingView(rootView: StrataCard())
     hosting.sizingOptions = []
+    // The card is drawn straight into the window: wrapping the hosting view in
+    // `NSGlassEffectView` is not an option — the glass frosts whatever it embeds, so
+    // wrapping the card blurs the card's own text instead of the desktop behind it.
+    // The background blur comes from the glass layer inside the card's own view tree
+    // (`cardSurface` in components.swift), which sits under the text.
     window.contentView = hosting
     window.title = "Strata" // never drawn (no title bar) but it is the Window-list identity
     window.backgroundColor = .clear // only the rounded card is drawn
@@ -1210,12 +1215,9 @@ func placeCardWindowDefault(_ window: NSWindow) {
 struct StrataCard: View {
     var body: some View {
         ZStack(alignment: Alignment(horizontal: .center, vertical: .top)) {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.linearGradient(colors: [
-                    hex("#161a1d").opacity(0.94), // st-surface
-                    hex("#0e1113").opacity(0.96), // st-bg (OLED-dark)
-                ], startPoint: UnitPoint(x: 0.37, y: 0.06), endPoint: UnitPoint(x: 0.63, y: 0.94)))
-                .stroke(cBorder.opacity(0.55), lineWidth: 1)
+            // The frosted card: the desktop behind the widget, blurred, under the
+            // design system's gradient (see cardSurface in components.swift).
+            cardSurface(radius: 16)
             VStack(spacing: 0) {
                 tabPillsRow()
                 // One key covers both reasons the content changes — a tab click and
